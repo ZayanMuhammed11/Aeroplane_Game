@@ -9,10 +9,10 @@ Built with Python, **OpenMMLab (MMPose)**, **PyQt5**, and **Pygame**.
 * **Touchless Control:** Uses advanced AI pose estimation to track your body movements via webcam. No controllers required.
 * **Two Game Modes:**
     * **Stationary Mode:** Focuses on squats and vertical movement.
-    * **Sideways Mode:** Focuses on vertical movement,lateral movement (Left/Right).
+    * **Sideways Mode:** Focuses on squats,vertical movement,lateral movement (Left/Right).
 * **3 Levels:** Easy,Medium and Hard levels to change the planes height and speed.
 * **Auto-Calibration:** Adjusts the planes height based on the persons height and distance from the camera(uses shoulder width).
-* **Instant Feedback:** Visual and audio cues guide you to correct your posture (e.g., "Keep Back Straight", "Bend Knees","Recalibrate").
+* **Instant Feedback:** Visual cues guide you to correct your posture (e.g., "Keep Back Straight", "Bend Knees","Recalibrate").
 
 ---
 Click the below link to download the Aeroplane_Game exe file
