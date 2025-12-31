@@ -1,0 +1,20 @@
+# --- Core AI & Math ---
+numpy==1.24.1
+opencv-python==4.12.0.88
+torch==2.1.2
+torchvision==0.16.2
+scipy==1.10.1
+
+# --- Game & GUI ---
+PyQt5==5.15.11
+pygame==2.6.1
+pillow==10.2.0
+
+# --- OpenMMLab (Pose Estimation) ---
+mmengine==0.10.7
+mmcv==2.1.0
+mmdet==3.2.0
+mmpose==1.3.2
+
+# --- Packaging ---
+pyinstaller==6.17.0
