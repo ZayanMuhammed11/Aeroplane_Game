@@ -35,8 +35,7 @@ def get_asset_path(filename):
 #               CONFIGURATION
 # ==========================================
 WEBCAM_ID = 0          
-# Use DirectShow (CAP_DSHOW) on Windows for faster/stable streaming
-CAP_BACKEND = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY  
+CAP_BACKEND = cv2.CAP_ANY  
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CAM_WIDTH  = 1280
 CAM_HEIGHT = 720
@@ -50,15 +49,17 @@ CV_COLOR_GREY = (100, 100, 100)
 STRICT_KNEE_THRESHOLD = 0.95
 MAX_KNEE_ANGLE = 170.0       
 MAX_TRUNK_LEAN = 25.0        
-CALIB_DURATION = 4.0         
+CALIB_DURATION = 3.0         
 MOVEMENT_THRESHOLD = 10.0
-ZONE_HOLD_DURATION = 3.0     
+ZONE_HOLD_DURATION = 1.0     
 MIN_TORSO_RATIO = 0.80       
 HIP_DROP_RATIO = 0.2         
 
 # KEYPOINTS
 NOSE = 0
 LEFT_SHOULDER, RIGHT_SHOULDER = 5, 6
+LEFT_ELBOW = 7
+RIGHT_ELBOW = 8
 LEFT_HIP, RIGHT_HIP = 11, 12
 LEFT_KNEE, RIGHT_KNEE = 13, 14
 LEFT_ANKLE, RIGHT_ANKLE = 15, 16
@@ -80,7 +81,6 @@ class AudioManager:
     def get_sound(cls, filename):
         if filename not in cls._SOUNDS:
             try:
-                # Ensure you have the 'get_asset_path' function defined at the top of your file!
                 path = get_asset_path(filename)
                 
                 if os.path.exists(path):
@@ -181,8 +181,8 @@ class GameEngine:
         self.message_timer = 0.0 
         
         # --- TIMERS ---
-        self.calib_timer = 0.0      # 4s Countdown
-        self.stable_timer = 0.0     # 2s Stability Check
+        self.calib_timer = 0.0      
+        self.stable_timer = 0.0     
         self.prev_nose_y = 0.0
 
         # Load Plane
@@ -198,12 +198,18 @@ class GameEngine:
             print(f"Error loading plane image: {e}")
 
     def reset(self):
-        self.phase = "WAITING_FOR_POSE" # Reset to Pre-Calibration
+        self.phase = "WAITING_FOR_POSE"
         self.score_dodged = 0
         self.score_total = 0
-        self.plane_active = False
         self.time_left = self.duration
         
+        # --- NEW: PLANE LIST MANAGEMENT ---
+        self.planes = []  # List of dicts: {'x': float, 'y': float, 'scored': bool}
+        self.spawn_timer = 0.0 # To control spawn rate if needed
+        self.calibrated_spawn_y = 0.0
+        # ----------------------------------
+        self.locked_user_center = None 
+
         self.calib_timer = 0.0
         self.stable_timer = 0.0
         self.message_timer = 0.0
@@ -219,7 +225,6 @@ class GameEngine:
             self.plane_speed = 18; self.difficulty_offset = 85
         elif self.difficulty == 3:
             self.plane_speed = 25; self.difficulty_offset = 125
-
     # --- CALCULATIONS ---
     def get_stable_head_y(self, kps):
         points = [kps[i][1] for i in range(5) if kps[i][1] > 0]
@@ -253,7 +258,7 @@ class GameEngine:
         return current_len / self.standing_leg_len
 
     # --- UPDATE LOOP ---
-    def update(self, frame, kps, dt):
+    def update(self, frame, all_kps_list, dt):
         h, w = frame.shape[:2]
         self.frame_counter += 1
         
@@ -261,61 +266,109 @@ class GameEngine:
             self.message_timer -= dt
             if self.message_timer <= 0: self.feedback_text = "" 
 
-        # Draw Skeleton
-        if kps is not None and len(kps) > 16:
+        # 1. DEFINE CALIBRATION BOX (Unified Logic)
+        if self.mode == "SIDEWAYS" and self.phase == "GAME":
+            current_margin = int(w * 0.25) #narrow for Gameplay
+        else:
+            current_margin = int(w * 0.35) # Narrow (Center) for Calibration & Stationary
+
+        box_x1 = current_margin
+        box_y1 = int(h * 0.1)
+        box_x2 = w - current_margin
+        box_y2 = h - 50 
+
+        # 2. STRICT SELECTION (With Continuity & Elbows)
+        kps = None 
+        found_valid_person = False
+        
+        if all_kps_list is not None and len(all_kps_list) > 0:
+            # Size approx = Distance between shoulders (Point 5 and 6)
+            all_kps_list.sort(key=lambda p: math.hypot(p[5][0]-p[6][0], p[5][1]-p[6][1]), reverse=True)
+
+            for person_kps in all_kps_list:
+                # [ADDED ELBOWS 7,8] to make sideways detection stricter!
+                body_indices = [NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_HIP, RIGHT_HIP, LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE]
+                
+                # A. BOUNDARY CHECK
+                all_parts_in = True
+                for idx in body_indices:
+                     # Skip elbows/wrists if they are not detected (score=0) to avoid false pauses
+                     if idx in [7, 8] and (person_kps[idx][0] == 0 or person_kps[idx][1] == 0):
+                         continue 
+
+                     px, py = person_kps[idx]
+                     if not (box_x1 < px < box_x2 and box_y1 < py < box_y2): 
+                         all_parts_in = False; break
+                
+                if all_parts_in:
+                    # B. CONTINUITY CHECK (Anti-Teleport)
+                    # If we tracked someone before, ensure the new detection is close by
+                    if self.phase == "GAME" and self.locked_user_center is not None:
+                        current_hip_x = (person_kps[LEFT_HIP][0] + person_kps[RIGHT_HIP][0]) / 2
+                        current_hip_y = (person_kps[LEFT_HIP][1] + person_kps[RIGHT_HIP][1]) / 2
+                        
+                        dist = math.hypot(current_hip_x - self.locked_user_center[0], 
+                                          current_hip_y - self.locked_user_center[1])
+                        
+                        # Strict Threshold: Center cannot jump > 200px instantly
+                        if dist < 200:
+                            kps = person_kps
+                            self.locked_user_center = (current_hip_x, current_hip_y)
+                            found_valid_person = True
+                            break 
+                    else:
+                        # First acquisition (or re-calibrating)
+                        kps = person_kps
+                        cx = (person_kps[LEFT_HIP][0] + person_kps[RIGHT_HIP][0]) / 2
+                        cy = (person_kps[LEFT_HIP][1] + person_kps[RIGHT_HIP][1]) / 2
+                        self.locked_user_center = (cx, cy)
+                        found_valid_person = True
+                        break
+
+        # If strict check failed (user stepped out), lose the lock
+        if not found_valid_person:
+            self.locked_user_center = None
+            kps = None
+
+        # Draw Skeleton (Visible ONLY during Calibration or Pause)
+        if kps is not None and self.phase != "GAME":
             for p1, p2 in SKELETON_LINKS:
                 pt1 = (int(kps[p1][0]), int(kps[p1][1])); pt2 = (int(kps[p2][0]), int(kps[p2][1]))
                 cv2.line(frame, pt1, pt2, (0, 200, 0), 4)
 
-        # 1. Global Box Check & Metrics
-        margin_x = int(w * 0.1); margin_y = int(h * 0.05)
-        box_x1, box_y1 = margin_x, margin_y; box_x2, box_y2 = w - margin_x, h - 50 
+        # 3. Game Metrics
         in_box = False; trunk_angle = 90.0; is_still = False
-        
-        if kps is not None and len(kps) > 16:
-            body_indices = [NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP, LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE]
-            all_parts_in = True
-            for idx in body_indices:
-                px, py = kps[idx]
-                if not (box_x1 < px < box_x2 and box_y1 < py < box_y2): all_parts_in = False; break
-            in_box = all_parts_in
-            
+        if kps is not None:
+            in_box = True 
             trunk_angle = self.calculate_trunk_angle(kps)
-            
             nose_y = kps[NOSE][1]
             movement = abs(nose_y - self.prev_nose_y)
             self.prev_nose_y = nose_y
             is_still = movement < MOVEMENT_THRESHOLD
 
         # ===============================================
-        #  PHASE 1: WAITING FOR POSE (2s Stability)
+        #  PHASE 1: WAITING FOR POSE
         # ===============================================
         if self.phase == "WAITING_FOR_POSE":
             color = CV_COLOR_GREEN if in_box else CV_COLOR_YELLOW
             cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), color, 3)
-            
             is_strict_straight = trunk_angle < 15.0 
 
-            if not in_box:
-                self.feedback_text = "STEP INSIDE BOX"; self.feedback_color = CV_COLOR_YELLOW; self.stable_timer = 0.0
-            elif not is_strict_straight:
-                self.feedback_text = "STAND STRAIGHT"; self.feedback_color = CV_COLOR_RED; self.stable_timer = 0.0
-            elif not is_still:
-                self.feedback_text = "STAND STILL"; self.feedback_color = CV_COLOR_RED; self.stable_timer = 0.0
+            if not in_box: self.feedback_text = "STEP INSIDE BOX"; self.feedback_color = CV_COLOR_YELLOW; self.stable_timer = 0.0
+            elif not is_strict_straight: self.feedback_text = "STAND STRAIGHT"; self.feedback_color = CV_COLOR_RED; self.stable_timer = 0.0
+            elif not is_still: self.feedback_text = "STAND STILL"; self.feedback_color = CV_COLOR_RED; self.stable_timer = 0.0
             else:
                 self.stable_timer += dt
                 remaining = max(0.0, 2.0 - self.stable_timer)
                 self.feedback_text = f"HOLD STEADY... {remaining:.1f}"
                 self.feedback_color = CV_COLOR_GREEN
-                if self.stable_timer >= 2.0:
-                    self.phase = "COUNTDOWN"; self.calib_timer = 0.0; AudioManager.play("TICK")
+                if self.stable_timer >= 2.0: self.phase = "COUNTDOWN"; self.calib_timer = 0.0; AudioManager.play("TICK")
 
         # ===============================================
         #  PHASE 2: COUNTDOWN (4s Timer)
         # ===============================================
         elif self.phase == "COUNTDOWN":
             cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), CV_COLOR_GREEN, 3)
-            
             is_strict_straight = trunk_angle < 15.0
             if not in_box or not is_strict_straight or not is_still:
                 self.phase = "WAITING_FOR_POSE"; self.stable_timer = 0.0; AudioManager.play("WARNING"); return 
@@ -324,42 +377,54 @@ class GameEngine:
             remaining = max(0, CALIB_DURATION - self.calib_timer)
             display_num = int(math.ceil(remaining))
             self.feedback_text = f"CALIBRATING: {display_num}"; self.feedback_color = CV_COLOR_GREEN
-            
             if int(remaining) != int(remaining + dt): AudioManager.play("TICK")
             
             if self.calib_timer >= CALIB_DURATION:
-                # CAPTURE METRICS
+                # 1. Capture Standard Metrics
                 l_dx = kps[LEFT_HIP][0] - kps[LEFT_ANKLE][0]; l_dy = kps[LEFT_HIP][1] - kps[LEFT_ANKLE][1]; l_len = math.hypot(l_dx, l_dy)
                 r_dx = kps[RIGHT_HIP][0] - kps[RIGHT_ANKLE][0]; r_dy = kps[RIGHT_HIP][1] - kps[RIGHT_ANKLE][1]; r_len = math.hypot(r_dx, r_dy)
                 self.standing_leg_len = (l_len + r_len) / 2.0
                 self.standing_head_y = self.get_stable_head_y(kps)
-                sx = kps[LEFT_SHOULDER][0] - kps[RIGHT_SHOULDER][0]; sy = kps[LEFT_SHOULDER][1] - kps[RIGHT_SHOULDER][1]; self.base_shoulder_width = math.hypot(sx, sy)
+                
+                sx = kps[LEFT_SHOULDER][0] - kps[RIGHT_SHOULDER][0]; sy = kps[LEFT_SHOULDER][1] - kps[RIGHT_SHOULDER][1]
+                self.base_shoulder_width = math.hypot(sx, sy)
+                
                 avg_ankle_y = (kps[LEFT_ANKLE][1] + kps[RIGHT_ANKLE][1]) / 2.0
-                self.base_body_height = avg_ankle_y - kps[NOSE][1]
-                s_mid_y = (kps[LEFT_SHOULDER][1] + kps[RIGHT_SHOULDER][1]) / 2.0; h_mid_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0; self.base_torso_length = abs(h_mid_y - s_mid_y)
-                avg_hip_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0; self.base_hip_height = avg_ankle_y - avg_hip_y
-                self.smooth_shoulder_width = self.base_shoulder_width; self.smooth_ankle_y = avg_ankle_y
+                self.base_body_height = avg_ankle_y - kps[NOSE][1] # Height in pixels
                 
-                # --- RESET GAME STATE FOR FRESH START ---
-                # This ensures the plane spawns from scratch using the NEW height
-                self.plane_active = False 
-                self.plane_pos = -50
-                self.plane_scored = False
-                self.is_altitude_locked = False
-                self.zone_hold_timer = 0.0
-                self.phase = "GAME"
+                s_mid_y = (kps[LEFT_SHOULDER][1] + kps[RIGHT_SHOULDER][1]) / 2.0
+                h_mid_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0
+                self.base_torso_length = abs(h_mid_y - s_mid_y)
                 
-                #AudioManager.play("SUCCESS"); self.feedback_text = ""
-                # Force the first target to be CENTER
+                avg_hip_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0
+                self.base_hip_height = avg_ankle_y - avg_hip_y
+                
+                self.smooth_shoulder_width = self.base_shoulder_width
+                self.smooth_ankle_y = avg_ankle_y
+                
+                # 2. CALCULATE DYNAMIC HEIGHT (Perspective Fix)
+                # We assume a "Standard Person" is ~500px tall on screen.
+                scale_factor = self.base_body_height / 500.0
+                
+                # Apply scale to the difficulty offset
+                # max(0.5, ...) ensures it doesn't get too tiny if you are extremely far
+                dynamic_offset = self.difficulty_offset * max(0.5, scale_factor)
+                
+                # Set the spawn height
+                self.calibrated_spawn_y = self.standing_head_y + dynamic_offset
+                
+                # 3. RESET GAME STATE
+                self.planes = [] 
+                self.plane_active = False; self.plane_pos = -50; self.plane_scored = False; self.is_altitude_locked = False
+                self.zone_hold_timer = 0.0; self.phase = "GAME"
+                self.feedback_text = ""
                 if self.mode == "SIDEWAYS": self.target_zone = "CENTER"
 
         # ===============================================
         #  PHASE 3: GAMEPLAY
         # ===============================================
         elif self.phase == "GAME":
-            # AUTO-PAUSE
-            if not in_box:
-                self.phase = "PAUSED_OUT_OF_BOUNDS"; AudioManager.play("WARNING"); return
+            if not in_box: self.phase = "PAUSED_OUT_OF_BOUNDS"; AudioManager.play("WARNING"); return
 
             self.time_left -= dt
             if self.time_left <= 0: self.phase = "GAMEOVER"; AudioManager.play("WARNING"); return
@@ -372,24 +437,10 @@ class GameEngine:
                     if self.smooth_ankle_y == 0: self.smooth_ankle_y = raw_ankle_y
                     self.smooth_shoulder_width = (raw_width * self.alpha) + (self.smooth_shoulder_width * (1.0 - self.alpha))
                     self.smooth_ankle_y = (raw_ankle_y * self.alpha) + (self.smooth_ankle_y * (1.0 - self.alpha))
-                    # 1. Calculate the Raw Scale based on shoulder width
-                    if self.base_shoulder_width > 0: 
-                        raw_scale = self.smooth_shoulder_width / self.base_shoulder_width
-                    else: 
-                        raw_scale = 1.0
-                    # (Assumes user stays at the same distance as calibration)
-                    # 1. SCALE LOGIC
-                    if self.mode == "STATIONARY":
-                        # Continuous updates for Stationary mode
-                        self.current_scale = raw_scale
-                        
-                    elif self.mode == "SIDEWAYS":
-                        # DO NOT UPDATE SCALE HERE.
-                        # We want to keep whatever value was calculated 
-                        # during the last "Center Hold". 
-                        # Just ensure it's not zero.
-                        if self.current_scale == 0: self.current_scale = 1.0
-
+                    if self.base_shoulder_width > 0: raw_scale = self.smooth_shoulder_width / self.base_shoulder_width
+                    else: raw_scale = 1.0
+                    if self.mode == "STATIONARY": self.current_scale = raw_scale
+                    elif self.mode == "SIDEWAYS" and self.current_scale == 0: self.current_scale = 1.0
                     projected_height = self.base_body_height * self.current_scale
                     virtual_nose_y = self.smooth_ankle_y - projected_height
                     dynamic_offset = self.difficulty_offset * self.current_scale
@@ -397,123 +448,169 @@ class GameEngine:
                     self.virtual_standing_hip_y = self.smooth_ankle_y - projected_hip_h
                     self.flight_altitude = virtual_nose_y + dynamic_offset
 
+                # --- STATIONARY MODE ---
                 if self.mode == "STATIONARY":
-                    if not self.plane_active: 
-                        self.plane_pos = -50; self.plane_active = True; self.plane_scored = False; self.is_altitude_locked = True; self.feedback_text = ""
-                    else:
-                        self.plane_pos += self.plane_speed; self.draw_plane(frame)
-                        if w//2 - 100 < self.plane_pos < w//2 + 100:
-                            if not self.plane_scored: self.resolve_collision_strict(kps)
-                        if self.plane_pos > w:
-                            if not self.plane_scored: self.score_total += 1; self.trigger_message("MISSED!", CV_COLOR_RED)
-                            self.plane_active = False; self.is_altitude_locked = False
+                    should_spawn = False
+                    if len(self.planes) == 0: should_spawn = True
+                    elif self.planes[-1]['scored']:
+                        if self.planes[-1].get('scored_time', 0.0) >= 0.5:
+                            if not self.planes[-1].get('has_spawned_next', False):
+                                should_spawn = True; self.planes[-1]['has_spawned_next'] = True
 
+                    if should_spawn:
+                        self.planes.append({'x': -50, 'y': self.calibrated_spawn_y, 'scored': False, 'scored_time': 0.0, 'has_spawned_next': False})
+
+                    for plane in self.planes[:]:
+                        plane['x'] += self.plane_speed
+                        if plane['scored']: plane['scored_time'] += dt
+                        self.flight_altitude = plane['y'] 
+                        if w//2 - 50 < plane['x'] < w//2 + 50:
+                            if not plane['scored']: self.resolve_collision_strict(kps); plane['scored'] = True 
+                        if plane['x'] > w:
+                            if not plane['scored']: self.score_total += 1; self.trigger_message("MISSED!", CV_COLOR_RED); plane['scored'] = True 
+                            self.planes.remove(plane)
+                    self.draw_plane(frame)
+
+                # --- SIDEWAYS MODE (UPDATED) ---
                 elif self.mode == "SIDEWAYS":
-                    x1, x2 = int(w*0.37), int(w*0.63)
+                    # 1. ZONES: Increased Center to 15% width
+                    # Left: 0-42.5% | Center: 42.5-57.5% | Right: 57.5-100%
+                    x1, x2 = int(w*0.425), int(w*0.575)
+                    
+                    cv2.line(frame, (x1,0), (x1,h), CV_COLOR_GREY, 2)
+                    cv2.line(frame, (x2,0), (x2,h), CV_COLOR_GREY, 2)
+                    
                     sh_mid = ((kps[LEFT_SHOULDER][0] + kps[RIGHT_SHOULDER][0]) / 2.0, (kps[LEFT_SHOULDER][1] + kps[RIGHT_SHOULDER][1]) / 2.0)
                     sx = int(sh_mid[0])
-                    cv2.line(frame, (x1,0), (x1,h), CV_COLOR_GREY, 2); cv2.line(frame, (x2,0), (x2,h), CV_COLOR_GREY, 2)
+                    
                     if sx < x1: self.current_zone = "LEFT"
                     elif sx > x2: self.current_zone = "RIGHT"
                     else: self.current_zone = "CENTER"
                     
-                    if not self.plane_active: 
-                        self.is_altitude_locked = False
-                        in_correct_zone = (self.current_zone == self.target_zone)
-                        if in_correct_zone:
-                            is_loose_straight = trunk_angle < 50.0 
-                            if not is_loose_straight: self.feedback_text = "STAND STRAIGHT"; self.feedback_color = CV_COLOR_RED; self.zone_hold_timer = 0.0
-                            elif not is_still: self.feedback_text = "STAND STILL"; self.feedback_color = CV_COLOR_RED; self.zone_hold_timer = 0.0
-                            else:
-                                self.zone_hold_timer += dt; remaining = max(0.0, ZONE_HOLD_DURATION - self.zone_hold_timer)
-                                display_num = int(math.ceil(remaining)); self.feedback_text = f"HOLD: {display_num}"; self.feedback_color = CV_COLOR_GREEN
-                                if int(remaining) != int(remaining + dt): AudioManager.play("TICK")
-                                if self.zone_hold_timer >= ZONE_HOLD_DURATION: 
-                                    # If target is LEFT or RIGHT, use the scale we saved 
-                                    # last time we were in the Center.
-                                    if self.target_zone == "CENTER":
-                                        # 1. Measure current shoulder width
-                                        curr_sx = kps[LEFT_SHOULDER][0] - kps[RIGHT_SHOULDER][0]
-                                        curr_sy = kps[LEFT_SHOULDER][1] - kps[RIGHT_SHOULDER][1]
-                                        current_width = math.hypot(curr_sx, curr_sy)
-                                        
-                                        # 2. Update the scale manually
-                                        if self.base_shoulder_width > 0:
-                                            self.current_scale = current_width / self.base_shoulder_width
-                                            
-                                            # Recalculate altitude immediately
-                                            projected_height = self.base_body_height * self.current_scale
-                                            virtual_nose_y = self.smooth_ankle_y - projected_height
-                                            dynamic_offset = self.difficulty_offset * self.current_scale
-                                            self.flight_altitude = virtual_nose_y + dynamic_offset
+                    # 2. GAME FLOW LOGIC
+                    should_spawn = False
+                    
+                    # We are ready for the next instruction if:
+                    # A. There are no planes OR
+                    # B. The last plane has already been hit/scored
+                    ready_for_next = (len(self.planes) == 0) or (self.planes[-1]['scored'] == True)
+
+                    if ready_for_next:
+                        # LOGIC: Wait 0.5s after hit before showing "MOVE TO..." text
+                        show_instructions = True
+                        if len(self.planes) > 0 and self.planes[-1]['scored']:
+                            if self.planes[-1]['scored_time'] < 0.5:
+                                show_instructions = False
+
+                        if show_instructions:
+                            in_correct_zone = (self.current_zone == self.target_zone)
+                            if in_correct_zone:
+                                is_loose_straight = trunk_angle < 50.0 
+                                if not is_loose_straight: self.feedback_text = "STAND STRAIGHT"; self.feedback_color = CV_COLOR_RED; self.zone_hold_timer = 0.0
+                                elif not is_still: self.feedback_text = "STAND STILL"; self.feedback_color = CV_COLOR_RED; self.zone_hold_timer = 0.0
+                                else:
+                                    self.zone_hold_timer += dt; remaining = max(0.0, ZONE_HOLD_DURATION - self.zone_hold_timer)
+                                    display_num = int(math.ceil(remaining)); self.feedback_text = f"HOLD: {display_num}"; self.feedback_color = CV_COLOR_GREEN
+                                    if int(remaining) != int(remaining + dt): AudioManager.play("TICK")
                                     
-                                    # 3. Launch Plane (Happens for ALL zones)
-                                    self.plane_active = True
-                                    self.plane_pos = -50
-                                    self.plane_scored = False
-                                    self.is_altitude_locked = True
-                                    self.zone_hold_timer = 0.0
-                                    self.feedback_text = ""
-     
-                        else:
-                            self.zone_hold_timer = 0.0
-                            if self.message_timer <= 0: self.feedback_text = f"MOVE TO {self.target_zone}!"; self.feedback_color = CV_COLOR_YELLOW
-                        self.draw_zone_highlight(frame, w, h, x1, x2)
-                    else:
-                        self.plane_pos += self.plane_speed; self.draw_plane(frame)
-                        if sx - 100 < self.plane_pos < sx + 100:
-                            if not self.plane_scored: self.resolve_collision_strict(kps)
-                        if self.plane_pos > w:
-                            if not self.plane_scored: self.score_total += 1; self.trigger_message("MISSED!", CV_COLOR_RED)
-                            self.pick_new_target(); self.plane_active = False; self.is_altitude_locked = False 
+                                    # HOLD COMPLETE -> SPAWN
+                                    if self.zone_hold_timer >= ZONE_HOLD_DURATION: 
+                                        should_spawn = True; self.zone_hold_timer = 0.0; self.feedback_text = ""
+                                        if self.target_zone == "CENTER":
+                                            curr_sx = kps[LEFT_SHOULDER][0] - kps[RIGHT_SHOULDER][0]; curr_sy = kps[LEFT_SHOULDER][1] - kps[RIGHT_SHOULDER][1]
+                                            current_width = math.hypot(curr_sx, curr_sy)
+                                            if self.base_shoulder_width > 0: self.current_scale = current_width / self.base_shoulder_width
+                            else:
+                                # User needs to move
+                                self.zone_hold_timer = 0.0
+                                if self.message_timer <= 0: self.feedback_text = f"MOVE TO {self.target_zone}!"; self.feedback_color = CV_COLOR_YELLOW
+                            
+                            self.draw_zone_highlight(frame, w, h, x1, x2)
+
+                    # 3. SPAWN LOGIC
+                    if should_spawn:
+                        # Prevent double spawning from the same "ready" event
+                        can_add = True
+                        if len(self.planes) > 0:
+                            if self.planes[-1].get('has_spawned_next', False): can_add = False
+                            else: self.planes[-1]['has_spawned_next'] = True
+                        
+                        if can_add:
+                            self.planes.append({'x': -50, 'y': self.calibrated_spawn_y, 'scored': False, 'scored_time': 0.0, 'has_spawned_next': False})
+
+                    # 4. UPDATE & COLLISION
+                    for plane in self.planes[:]:
+                        plane['x'] += self.plane_speed
+                        if plane['scored']: plane['scored_time'] += dt
+                        
+                        self.flight_altitude = plane['y'] 
+                        
+                        # Collision Check (Tracking User Position 'sx')
+                        if sx - 100 < plane['x'] < sx + 100:
+                            if not plane['scored']: 
+                                self.resolve_collision_strict(kps)
+                                plane['scored'] = True 
+                                # TRIGGER NEW TARGET IMMEDIATELY ON HIT
+                                self.pick_new_target() 
+
+                        # Off-screen Check
+                        if plane['x'] > w:
+                            if not plane['scored']: 
+                                self.score_total += 1; self.trigger_message("MISSED!", CV_COLOR_RED); plane['scored'] = True 
+                                self.pick_new_target() # Also pick new target on miss
+                            
+                            self.planes.remove(plane)
+                            
+                    self.draw_plane(frame)
 
         # ===============================================
         #  PHASE 4: PAUSED (OUT OF BOUNDS)
         # ===============================================
         elif self.phase == "PAUSED_OUT_OF_BOUNDS":
-            cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), CV_COLOR_YELLOW, 3)
+            # Force Narrow Box for re-calibration
+            narrow_margin = int(w * 0.35)
+            box_x1 = narrow_margin; box_y1 = int(h * 0.1); box_x2 = w - narrow_margin; box_y2 = h - 50 
             
-            # 1. Main Warning (Handled by the master drawer below)
+            cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), CV_COLOR_YELLOW, 3)
             self.feedback_text = "OUT OF BOUNDS! RECALIBRATE"
             self.feedback_color = CV_COLOR_RED
-            
-            # 2. Subtitle (Manually centered below the main text)
             sub_text = "STEP INSIDE BOX TO RESUME"
-            t_size = cv2.getTextSize(sub_text, cv2.FONT_HERSHEY_TRIPLEX, 0.8, 2)[0]
-            t_x = (w - t_size[0]) // 2
-            self.draw_shadow_text(frame, sub_text, (t_x, 100), 0.8, CV_COLOR_YELLOW) # Appears at Top Center (Y=100)
+            t_size = cv2.getTextSize(sub_text, cv2.FONT_HERSHEY_TRIPLEX, 0.8, 2)[0]; t_x = (w - t_size[0]) // 2
+            self.draw_shadow_text(frame, sub_text, (t_x, 100), 0.8, CV_COLOR_YELLOW)
             
-            if in_box:
-                self.phase = "WAITING_FOR_POSE"
-                self.stable_timer = 0.0
-                self.prev_stability_kps = {} 
-                self.feedback_text = "HOLD STEADY..."
-        # ===============================================
-        #  FINAL STEP: DRAW GLOBAL FEEDBACK TEXT (TOP CENTER)
-        # ===============================================
-        # This draws whatever is inside 'self.feedback_text' at the top center
+            # Check strict re-entry
+            # (Re-use strict boundary check here to confirm user is back in narrow box)
+            if kps is not None:
+                all_parts_in = True
+                for idx in [NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_HIP, RIGHT_HIP, LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE]:
+                     if idx in [7, 8] and (kps[idx][0] == 0 or kps[idx][1] == 0): continue
+                     px, py = kps[idx]
+                     if not (box_x1 < px < box_x2 and box_y1 < py < box_y2): all_parts_in = False; break
+                
+                if all_parts_in:
+                    self.phase = "WAITING_FOR_POSE"; self.stable_timer = 0.0; self.feedback_text = "HOLD STEADY..."
+        
+        # FINAL STEP: DRAW GLOBAL FEEDBACK TEXT
         if self.feedback_text:
-            font_scale = 1.2
-            thickness = 3
+            font_scale = 1.2; thickness = 3
             text_size = cv2.getTextSize(self.feedback_text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)[0]
-            
-            text_w, text_h = text_size
-            center_x = (w - text_w) // 2
-            center_y = 60  # Fixed Y position at the top
-            
-            # Draw Shadow
-            cv2.putText(frame, self.feedback_text, (center_x + 2, center_y + 2), 
-                        cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness)
-            # Draw Main Text
-            cv2.putText(frame, self.feedback_text, (center_x, center_y), 
-                        cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.feedback_color, thickness)
+            text_w, text_h = text_size; center_x = (w - text_w) // 2; center_y = 60 
+            cv2.putText(frame, self.feedback_text, (center_x + 2, center_y + 2), cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness)
+            cv2.putText(frame, self.feedback_text, (center_x, center_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.feedback_color, thickness)
 
+    # --- HELPER: DRAW ZONES (Missing Function) ---
     def draw_zone_highlight(self, frame, w, h, x1, x2):
+        # Flashing effect every 10 frames
         if (self.frame_counter // 10) % 2 == 0:
             overlay = frame.copy()
-            if self.target_zone == "LEFT": cv2.rectangle(overlay, (0, 0), (x1, h), CV_COLOR_YELLOW, -1)
-            elif self.target_zone == "RIGHT": cv2.rectangle(overlay, (x2, 0), (w, h), CV_COLOR_YELLOW, -1)
-            else: cv2.rectangle(overlay, (x1, 0), (x2, h), CV_COLOR_YELLOW, -1)
+            if self.target_zone == "LEFT": 
+                cv2.rectangle(overlay, (0, 0), (x1, h), CV_COLOR_YELLOW, -1)
+            elif self.target_zone == "RIGHT": 
+                cv2.rectangle(overlay, (x2, 0), (w, h), CV_COLOR_YELLOW, -1)
+            else: # CENTER
+                cv2.rectangle(overlay, (x1, 0), (x2, h), CV_COLOR_YELLOW, -1)
+            
+            # Apply transparent overlay (alpha blending)
             cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
 
     def pick_new_target(self):
@@ -528,30 +625,38 @@ class GameEngine:
         self.target_zone = random.choice(options)
 
     def draw_plane(self, frame):
-        if self.plane_img is None:
-            ix, iy = int(self.plane_pos), int(self.flight_altitude)
-            h, w = frame.shape[:2]
-            cv2.line(frame, (0, iy), (w, iy), CV_COLOR_YELLOW, 2)
-            return
-
-        ix, iy = int(self.plane_pos), int(self.flight_altitude)
         h, w = frame.shape[:2]
-        ph, pw = self.plane_img.shape[:2]
-        x_start = ix - pw // 2; y_start = iy - ph // 2; x_end = x_start + pw; y_end = y_start + ph
-        x1 = max(0, x_start); y1 = max(0, y_start); x2 = min(w, x_end); y2 = min(h, y_end)
         
-        if x1 < x2 and y1 < y2:
-            px1 = x1 - x_start; py1 = y1 - y_start; px2 = px1 + (x2 - x1); py2 = py1 + (y2 - y1)
-            roi = frame[y1:y2, x1:x2]
-            plane_chunk = self.plane_img[py1:py2, px1:px2]
-            if plane_chunk.shape[2] == 4:
-                plane_rgb = plane_chunk[:, :, :3]
-                alpha_mask = plane_chunk[:, :, 3] / 255.0
-                alpha_inv = 1.0 - alpha_mask
-                for c in range(3):
-                    roi[:, :, c] = (alpha_mask * plane_rgb[:, :, c] + alpha_inv * roi[:, :, c])
-                frame[y1:y2, x1:x2] = roi
-        cv2.line(frame, (0, iy), (w, iy), CV_COLOR_YELLOW, 2)
+        for plane in self.planes:
+            # --- NEW: VISIBILITY CHECK ---
+            # If plane has been scored (hit/success) for > 0.5s, skip drawing it (Invisible)
+            if plane.get('scored', False) and plane.get('scored_time', 0.0) >= 0.5:
+                continue
+            # -----------------------------
+
+            ix, iy = int(plane['x']), int(plane['y'])
+            
+            # Draw Yellow Line
+            cv2.line(frame, (0, iy), (w, iy), CV_COLOR_YELLOW, 2)
+
+            if self.plane_img is None:
+                continue
+
+            ph, pw = self.plane_img.shape[:2]
+            x_start = ix - pw // 2; y_start = iy - ph // 2; x_end = x_start + pw; y_end = y_start + ph
+            x1 = max(0, x_start); y1 = max(0, y_start); x2 = min(w, x_end); y2 = min(h, y_end)
+            
+            if x1 < x2 and y1 < y2:
+                px1 = x1 - x_start; py1 = y1 - y_start; px2 = px1 + (x2 - x1); py2 = py1 + (y2 - y1)
+                roi = frame[y1:y2, x1:x2]
+                plane_chunk = self.plane_img[py1:py2, px1:px2]
+                if plane_chunk.shape[2] == 4:
+                    plane_rgb = plane_chunk[:, :, :3]
+                    alpha_mask = plane_chunk[:, :, 3] / 255.0
+                    alpha_inv = 1.0 - alpha_mask
+                    for c in range(3):
+                        roi[:, :, c] = (alpha_mask * plane_rgb[:, :, c] + alpha_inv * roi[:, :, c])
+                    frame[y1:y2, x1:x2] = roi
 
     def resolve_collision_strict(self, kps):
         current_head_y = self.get_stable_head_y(kps); is_under_line = current_head_y > self.flight_altitude
@@ -594,6 +699,7 @@ class VideoWorker(QThread):
         self.running = True
         self.is_game_active = False # Flag to control processing
 
+    # --- OPTIMIZED RUN LOOP (Reduces Lag) ---
     def run(self):
         cap = None
         try:
@@ -602,10 +708,11 @@ class VideoWorker(QThread):
             else:
                 cap = cv2.VideoCapture(WEBCAM_ID, CAP_BACKEND)
             
+            # Resolution - Lowering slightly can also help lag if needed
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
             
-            time.sleep(0.5)
+            time.sleep(1.0)
 
             if not cap.isOpened():
                 self.camera_error.emit(f"CAMERA {WEBCAM_ID} FAILED")
@@ -628,17 +735,22 @@ class VideoWorker(QThread):
                     dt = current_time - last_time
                     last_time = current_time
 
+                    # --- OPTIMIZATION: Process AI only every 2nd frame ---
                     if frame_skip_counter % 2 == 0:
                         result = self.inferencer(frame, show=False)
                         current_kps = self.extract_kps(result)
                     
                     frame_skip_counter += 1
 
+                    # Update game logic (uses last known KPS if skipped)
                     self.game.update(frame, current_kps, dt)
 
                     if self.game.phase == "GAMEOVER":
                         self.game_over.emit()
                         self.is_game_active = False
+
+                    #if self.game.feedback_text:
+                     #   self.draw_shadow_text(frame, self.game.feedback_text, (CAM_WIDTH//2 - 200, 100), 1.2, self.game.feedback_color)
 
                     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     h, w, ch = rgb_image.shape
@@ -660,9 +772,14 @@ class VideoWorker(QThread):
     def extract_kps(self, result):
         try:
             result_list = list(result)
-            return np.array(result_list[0]["predictions"][0][0]["keypoints"], dtype=float)
+            # Get list of ALL instances (people) detected in the frame
+            instances = result_list[0]["predictions"][0] 
+            all_kps = []
+            for inst in instances:
+                all_kps.append(np.array(inst["keypoints"], dtype=float))
+            return all_kps # Returns a LIST of skeletons
         except:
-            return None
+            return []
 
 # ==========================================
 #            PYQT USER INTERFACE
@@ -690,6 +807,7 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
         self.init_landing_screen() 
+        self.init_instructions_screen()
         self.init_menu_screen() 
         self.init_settings_screen()
         self.init_game_screen()
@@ -1048,7 +1166,7 @@ class MainWindow(QMainWindow):
         btn_back.setFixedSize(160, 55); btn_back.setCursor(Qt.PointingHandCursor)
         # --- SOUND ---
         btn_back.clicked.connect(lambda: AudioManager.play("EXIT"))
-        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
+        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
         btn_back.setStyleSheet("""
             QPushButton { background-color: rgba(30, 30, 46, 0.8); color: #f38ba8; border: 3px solid #f38ba8; border-radius: 15px; font-weight: bold; font-size: 20px;}
             QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
@@ -1068,6 +1186,126 @@ class MainWindow(QMainWindow):
         self.central_widget.addWidget(self.settings_page)
         self.set_difficulty(1)
 
+    # --- NEW: INSTRUCTIONS SCREEN (Scaled to Fit Box) ---
+    def init_instructions_screen(self):
+        self.instr_page = QWidget()
+
+        # 1. Background Setup
+        palette = QPalette()
+        screen_rect = QApplication.primaryScreen().size()
+        path_bg = get_asset_path("bg2.png")
+
+        if os.path.exists(path_bg):
+            img = QImage(path_bg).scaled(screen_rect, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            palette.setBrush(QPalette.Window, QBrush(img))
+            self.instr_page.setAutoFillBackground(True)
+            self.instr_page.setPalette(palette)
+        else:
+            self.instr_page.setStyleSheet("background-color: #1e1e2e;")
+
+        # 2. Main Layout
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+
+        # 3. Content Container
+        content_box = QFrame()
+        content_box.setFixedSize(1150, 700) 
+        content_box.setStyleSheet("""
+            QFrame {
+                background-color: rgba(30, 30, 46, 0.95); 
+                border: 4px solid #89b4fa;
+                border-radius: 40px;
+            }
+        """)
+        
+        box_layout = QVBoxLayout(content_box)
+        box_layout.setSpacing(0)
+        box_layout.setContentsMargins(15, 25, 15, 20) 
+
+        # Title Label
+        lbl_title = QLabel("HOW TO PLAY")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        lbl_title.setStyleSheet("""
+            background-color: transparent;
+            color: #89b4fa;
+            font-family: 'Segoe UI';
+            font-weight: 900;
+            font-size: 65px;
+            margin-bottom: 5px; 
+            border: none;
+        """)
+
+        # Instructions Body Text
+        lbl_instr = QLabel()
+        lbl_instr.setWordWrap(True)
+        lbl_instr.setTextFormat(Qt.RichText)
+        lbl_instr.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        lbl_instr.setStyleSheet("border: none; background-color: transparent;")
+        
+        # HTML Formatting (SCALED UP)
+        instructions_html = """
+        <div style='color: #cdd6f4; font-family: Segoe UI; font-size: 28px; line-height: 140%; text-align: left;'>
+            <ul style='margin-left: 0px; padding-left: 10px; margin-top: 0px;'>
+                <li style='margin-bottom: 20px;'>
+                    <b style='color: #f9e2af;'>How to Win:</b> Perform perfect squats to avoid planes hitting you. Hits reduce your accuracy, so stay sharp!
+                </li>
+                <li style='margin-bottom: 20px;'>
+                    <b style='color: #a6e3a1;'>Setup:</b> Align yourself within the <b>Green Box</b>. The game auto-calibrates when you stand still,<i style='color:#f38ba8;'>Do not change position excessively.</i>
+                </li>
+                <li style='margin-bottom: 20px;'>
+                    <b>Stationary Mode:</b> Stand in place and <b>Squat</b> to avoid planes.
+                </li>
+                <li style='margin-bottom: 20px;'>
+                    <b>Sideways Mode:</b> Agility test! Quickly move to the highlighted <b>Left/Right</b> zone before squatting.
+                </li>
+                <li style='margin-bottom: 20px;'>
+                    <b>Perfect Form:</b> The camera tracks your body. Keep your chest up and bend your knees while squatting. Avoid excessive movement or improper posture.
+                </li>
+            </ul>
+        </div>
+        """
+        lbl_instr.setText(instructions_html)
+
+        # 5. Buttons (Start & Back)
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(50)
+        btn_layout.setAlignment(Qt.AlignCenter)
+
+        # BACK BUTTON
+        btn_back = QPushButton("BACK")
+        btn_back.setFixedSize(240, 75)
+        btn_back.setCursor(Qt.PointingHandCursor)
+        btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
+        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(0))
+        btn_back.setStyleSheet("""
+            QPushButton { background-color: rgba(30, 30, 46, 0.5); color: #f38ba8; border: 3px solid #f38ba8; border-radius: 20px; font-weight: bold; font-size: 22px;}
+            QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
+        """)
+
+        # START BUTTON
+        btn_start = QPushButton("START")
+        btn_start.setFixedSize(240, 75)
+        btn_start.setCursor(Qt.PointingHandCursor)
+        btn_start.clicked.connect(lambda: AudioManager.play("CLICK")) 
+        btn_start.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
+        btn_start.setStyleSheet("""
+            QPushButton { background-color: #a6e3a1; color: #1e1e2e; border: none; border-radius: 20px; font-size: 24px; font-weight: 900; }
+            QPushButton:hover { background-color: #94e28d; border: 4px solid #ffffff; }
+            QPushButton:pressed { background-color: #81c88b; }
+        """)
+
+        btn_layout.addWidget(btn_back)
+        btn_layout.addWidget(btn_start)
+
+        # Assemble
+        box_layout.addWidget(lbl_title)
+        box_layout.addWidget(lbl_instr, 1) 
+        box_layout.addLayout(btn_layout)
+        
+        layout.addWidget(content_box)
+        self.instr_page.setLayout(layout)
+        
+        self.central_widget.addWidget(self.instr_page)
     # --- UPDATED GAME SCREEN (Grouped Info Boxes) ---
     def init_game_screen(self):
         page = QWidget()
@@ -1257,7 +1495,7 @@ class MainWindow(QMainWindow):
         
         # --- SOUND ---
         btn_exit_menu.clicked.connect(lambda: AudioManager.play("EXIT"))
-        btn_exit_menu.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
+        btn_exit_menu.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
         
         btn_exit_menu.setStyleSheet("""
             QPushButton {
@@ -1282,7 +1520,7 @@ class MainWindow(QMainWindow):
     def go_to_settings(self, mode):
         self.game_engine.mode = mode
         self.lbl_mode.setText(f"MODE: {mode}")
-        self.central_widget.setCurrentIndex(2)
+        self.central_widget.setCurrentIndex(3)
 
     def set_difficulty(self, level):
         self.game_engine.difficulty = level
@@ -1293,7 +1531,7 @@ class MainWindow(QMainWindow):
         self.btn_hard.setChecked(level == 3)
     def change_time(self, seconds):
         new_time = self.game_engine.duration + seconds
-        if 60 <= new_time <= 600:
+        if 60 <= new_time <= 1500:
             self.game_engine.duration = new_time
             m = int(new_time // 60)
             s = int(new_time % 60)
@@ -1325,9 +1563,9 @@ class MainWindow(QMainWindow):
     def start_game(self):
         self.game_engine.reset()
         self.show_loading_screen()
-        self.central_widget.setCurrentIndex(3) # Jump to Game (Index 3)
+        # Change 3 to 4, because Instructions is now 3
+        self.central_widget.setCurrentIndex(4) 
         
-        # UPDATED: Just activate the existing worker
         if self.worker:
             self.worker.is_game_active = True
 
@@ -1369,7 +1607,7 @@ class MainWindow(QMainWindow):
         self.lbl_final_accuracy.repaint()
 
         # 6. SWITCH SCREEN
-        self.central_widget.setCurrentIndex(4) # Jump to Score (Index 4)
+        self.central_widget.setCurrentIndex(5) # Jump to Score (Index 5)
 
     def exit_to_menu(self):
         self.central_widget.setCurrentIndex(0) # Back to Landing (Index 0)
@@ -1393,4 +1631,6 @@ if __name__ == "__main__":
     window = MainWindow()
     window.showFullScreen()
     sys.exit(app.exec_())
+
+
 
