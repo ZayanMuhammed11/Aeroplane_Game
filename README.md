@@ -17,7 +17,7 @@ Built with Python, **OpenMMLab (MMPose)**, **PyQt5**, and **Pygame**.
 ---
 Click the below link to download the Aeroplane Game exe file
 
-[Click here](https://drive.google.com/file/d/1JznEjBFDL4mMKg7UD8LXKuvWJcmlp0Ll/view?usp=drive_link)
+[Click here](https://drive.google.com/drive/folders/16J_Gc7fQvvzFtJDKhLxjKSkpFe0jGCLr?usp=drive_link)
 
 
 > **Note:** The Game will take around 1 minute to load.Make sure that the system is connected to internet during the first opening of the game.
