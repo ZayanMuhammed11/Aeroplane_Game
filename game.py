@@ -14,7 +14,7 @@ import traceback
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QStackedWidget, 
                              QFrame, QSizePolicy,
-                             QStackedLayout, QGridLayout)
+                             QStackedLayout, QGridLayout,QProgressBar)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRect, QSize
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPainter, QColor, QPalette, QBrush, QIcon
 
@@ -684,84 +684,124 @@ class GameEngine:
         cv2.putText(img, text, pos, cv2.FONT_HERSHEY_TRIPLEX, scale, color, 2)
 
 # ==========================================
-#            WORKER THREAD (VIDEO) - PERSISTENT
+#            WORKER THREAD (VIDEO) - ROBUST VERSION
 # ==========================================
 class VideoWorker(QThread):
     frame_update = pyqtSignal(QImage)
     stats_update = pyqtSignal(int, int, str, int, str)
     game_over = pyqtSignal()
-    camera_error = pyqtSignal(str) 
+    camera_error = pyqtSignal(str)
+    
+    # Signal to unlock the start button
+    camera_ready = pyqtSignal() 
 
     def __init__(self, game_engine, inferencer):
         super().__init__()
         self.game = game_engine
         self.inferencer = inferencer
         self.running = True
-        self.is_game_active = False # Flag to control processing
+        self.is_game_active = False
 
-    # --- OPTIMIZED RUN LOOP (Reduces Lag) ---
     def run(self):
         cap = None
+        
+        # 1. SMART INITIALIZATION
+        # If DSHOW fails (Black Screen), we automatically switch to MSMF (Force Wake)
+        backends = []
+        if os.name == 'nt':
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF] 
+        else:
+            backends = [cv2.CAP_ANY]
+
+        active_backend_name = "NONE"
+
+        for backend in backends:
+            try:
+                print(f"[CAMERA] Trying connection method: {backend}...")
+                temp_cap = cv2.VideoCapture(WEBCAM_ID, backend)
+                
+                # Set Resolution
+                temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
+                temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
+                
+                # TEST: Read 5 frames to see if they are valid
+                valid_frames = 0
+                for _ in range(10):
+                    ret, test_frame = temp_cap.read()
+                    if ret and test_frame is not None and test_frame.size > 0:
+                        # Check if it's not purely black (sum of pixels > 0)
+                        if np.sum(test_frame) > 0:
+                            valid_frames += 1
+                    time.sleep(0.05)
+
+                if valid_frames > 0:
+                    print(f"[CAMERA] Success with backend {backend}!")
+                    cap = temp_cap
+                    break # We found a working camera!
+                else:
+                    print(f"[CAMERA] Backend {backend} gave black screen. Retrying...")
+                    temp_cap.release()
+            
+            except Exception as e:
+                print(f"[CAMERA] Error with backend {backend}: {e}")
+                if temp_cap: temp_cap.release()
+
+        # 2. FINAL CHECK
+        if cap is None or not cap.isOpened():
+            self.camera_error.emit(f"CAMERA {WEBCAM_ID} NOT FOUND")
+            self.running = False
+            return
+
+        # 3. SIGNAL READY (Unlocks the button)
+        self.camera_ready.emit() 
+
+        last_time = time.time()
+        current_kps = []
+        frame_skip_counter = 0
+
+        # 4. MAIN LOOP
         try:
-            if os.name == 'nt':
-                cap = cv2.VideoCapture(WEBCAM_ID, cv2.CAP_DSHOW)
-            else:
-                cap = cv2.VideoCapture(WEBCAM_ID, CAP_BACKEND)
-            
-            # Resolution - Lowering slightly can also help lag if needed
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
-            
-            time.sleep(1.0)
-
-            if not cap.isOpened():
-                self.camera_error.emit(f"CAMERA {WEBCAM_ID} FAILED")
-                self.running = False
-                return
-
-            last_time = time.time()
-            frame_skip_counter = 0  # Counter for skipping
-            current_kps = None      # Store last known keypoints
-
             while self.running:
                 ret, frame = cap.read()
                 if not ret: 
                     time.sleep(0.01)
                     continue
 
+                frame = cv2.flip(frame, 1)
+
+                # --- IF GAME IS PLAYING: Run AI ---
                 if self.is_game_active:
-                    frame = cv2.flip(frame, 1)
                     current_time = time.time()
                     dt = current_time - last_time
                     last_time = current_time
 
-                    # --- OPTIMIZATION: Process AI only every 2nd frame ---
                     if frame_skip_counter % 2 == 0:
-                        result = self.inferencer(frame, show=False)
-                        current_kps = self.extract_kps(result)
+                        try:
+                            result = self.inferencer(frame, show=False)
+                            current_kps = self.extract_kps(result)
+                        except: pass
                     
                     frame_skip_counter += 1
 
-                    # Update game logic (uses last known KPS if skipped)
                     self.game.update(frame, current_kps, dt)
 
                     if self.game.phase == "GAMEOVER":
                         self.game_over.emit()
                         self.is_game_active = False
+                    
+                    # Send Stats
+                    col = "#00FF00" if self.game.feedback_color == CV_COLOR_GREEN else "#FF0000"
+                    if self.game.feedback_color == CV_COLOR_YELLOW: col = "#FFFF00"
+                    self.stats_update.emit(self.game.score_dodged, self.game.score_total, self.game.feedback_text, int(self.game.time_left), col)
 
-                    #if self.game.feedback_text:
-                     #   self.draw_shadow_text(frame, self.game.feedback_text, (CAM_WIDTH//2 - 200, 100), 1.2, self.game.feedback_color)
-
+                # --- ALWAYS SEND VIDEO (Even in Menu) ---
+                try:
                     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     h, w, ch = rgb_image.shape
                     bytes_per_line = ch * w
                     qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
                     self.frame_update.emit(qt_image)
-                    
-                    color_hex = "#00FF00" if self.game.feedback_color == CV_COLOR_GREEN else "#FF0000" if self.game.feedback_color == CV_COLOR_RED else "#FFFF00"
-                    self.stats_update.emit(self.game.score_dodged, self.game.score_total, self.game.feedback_text, int(self.game.time_left), color_hex)
-                else:
-                    time.sleep(0.03)
+                except: pass
 
         except Exception as e:
             traceback.print_exc()
@@ -772,29 +812,148 @@ class VideoWorker(QThread):
     def extract_kps(self, result):
         try:
             result_list = list(result)
-            # Get list of ALL instances (people) detected in the frame
             instances = result_list[0]["predictions"][0] 
             all_kps = []
             for inst in instances:
                 all_kps.append(np.array(inst["keypoints"], dtype=float))
-            return all_kps # Returns a LIST of skeletons
+            return all_kps 
         except:
             return []
+
+# ==========================================
+#            SPLASH SCREEN LOGIC
+# ==========================================
+class LoadingScreen(QWidget):
+    def __init__(self):
+        super().__init__()
+        # 1. Full Screen Setup
+        screen_geo = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen_geo) 
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        
+        # --- SET BACKGROUND (bg1.png) ---
+        self.setAutoFillBackground(True)
+        path_bg = get_asset_path("bg1.png")
+        if os.path.exists(path_bg):
+            img = QImage(path_bg).scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            palette = QPalette()
+            palette.setBrush(QPalette.Window, QBrush(img))
+            self.setPalette(palette)
+        else:
+            self.setStyleSheet("background-color: #0d1b2a;")
+
+        # Main Layout
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(layout)
+
+        layout.addStretch() # Pushes everything to the bottom
+
+        # --- THE CONTAINER FRAME (Transparent) ---
+        self.frame = QFrame()
+        self.frame.setFixedHeight(150) 
+        self.frame.setStyleSheet("""
+            QFrame {
+                background-color: transparent; 
+                border: none;
+            }
+        """)
+        
+        # Layout INSIDE the frame
+        frame_layout = QVBoxLayout(self.frame)
+        frame_layout.setContentsMargins(50, 20, 50, 30) 
+        frame_layout.setSpacing(10)
+
+        # Loading Label
+        self.status_label = QLabel("Loading...")
+        self.status_label.setStyleSheet("""
+            color: #ffffff; 
+            font-family: 'Segoe UI'; 
+            font-size: 24px; 
+            font-weight: 900; 
+            background: transparent;
+            border: none;
+            margin-left: 5px;
+        """)
+        self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        # --- PROGRESS BAR ---
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(30) 
+        
+        # 1. ENABLE TEXT INSIDE BAR
+        self.progress_bar.setTextVisible(True) 
+        self.progress_bar.setAlignment(Qt.AlignCenter) # Center the % text
+        self.progress_bar.setFormat("%p%") # Format: "50%"
+        
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: rgba(255, 255, 255, 0.2); 
+                border-radius: 15px; 
+                border: none;
+                /* Text Styling */
+                color: white;
+                font-weight: bold;
+                font-family: 'Segoe UI';
+                font-size: 16px;
+            }
+            QProgressBar::chunk {
+                background-color: #FFD700; /* yellow Fill */
+                border-radius: 15px;
+            }
+        """)
+
+        # Add items to the frame
+        frame_layout.addWidget(self.status_label)
+        frame_layout.addWidget(self.progress_bar)
+
+        # Add the frame to the main layout
+        layout.addWidget(self.frame)
+
+    def update_progress(self, value, message):
+        self.progress_bar.setValue(value)
+
+class GameLoader(QThread):
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(object, object) # Returns (inferencer, game_engine)
+
+    def run(self):
+        # 1. Init Game Logic
+        self.progress.emit(10, "Initializing Game Engine...")
+        time.sleep(0.2)
+        game_engine = GameEngine()
+
+        # 2. Load AI Models (Heavy Task)
+        self.progress.emit(30, "Loading AI Brain (MMPose)...")
+        try:
+            inferencer = MMPoseInferencer(
+                pose2d="human",
+                device=DEVICE
+            )
+        except Exception as e:
+            print(f"Error loading AI: {e}")
+            inferencer = None
+
+        self.progress.emit(80, "Configuring Camera...")
+        time.sleep(0.5)
+
+        self.progress.emit(100, "Ready to Fly!")
+        time.sleep(0.5) 
+        
+        self.finished.emit(inferencer, game_engine)
 
 # ==========================================
 #            PYQT USER INTERFACE
 # ==========================================
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, inferencer, game_engine):
         super().__init__()
         pygame.mixer.init(44100, -16, 2, 256) # Initialize audio mixer
         self.setWindowTitle("Aeroplane Game")
         self.setStyleSheet("QMainWindow { background-color: #1e1e2e; } QLabel { color: white; font-family: 'Segoe UI'; }")
-        self.shared_inferencer = MMPoseInferencer(
-            pose2d="human",
-            device=DEVICE
-            )
-        self.game_engine = GameEngine()
+        # USE THE PASSED OBJECTS
+        self.shared_inferencer = inferencer
+        self.game_engine = game_engine
         self.central_widget = QStackedWidget()
         self.setCentralWidget(self.central_widget)
 
@@ -804,6 +963,7 @@ class MainWindow(QMainWindow):
         self.worker.stats_update.connect(self.update_hud)
         self.worker.game_over.connect(self.game_finished)
         self.worker.camera_error.connect(self.show_error_screen)
+        self.worker.camera_ready.connect(self.enable_start_button)
         self.worker.start()
 
         self.init_landing_screen() 
@@ -812,6 +972,14 @@ class MainWindow(QMainWindow):
         self.init_settings_screen()
         self.init_game_screen()
         self.init_scorecard_screen() 
+        
+
+    def enable_start_button(self):
+        # This runs automatically when the camera is fully loaded
+        # It unlocks the Start button so the user can click it
+        if hasattr(self, 'btn_start'):
+            self.btn_start.setText("START SESSION")
+            self.btn_start.setEnabled(True)
 
     # Override closeEvent to properly release camera on exit
     def closeEvent(self, event):
@@ -856,7 +1024,7 @@ class MainWindow(QMainWindow):
         button_layout.setSpacing(50)
         button_layout.setAlignment(Qt.AlignCenter)
 
-        # STYLE: No ugly box. The button 'Floats Up' when hovered.
+        
         LANDING_BTN_STYLE = """
             QPushButton {
                 background-color: transparent;
@@ -1150,21 +1318,44 @@ class MainWindow(QMainWindow):
         time_layout.addWidget(btn_minus); time_layout.addSpacing(25)
         time_layout.addWidget(self.lbl_time); time_layout.addSpacing(25)
         time_layout.addWidget(btn_plus)
+        
+        # 1. Create button in DISABLED (Grey) state initially
+        self.btn_start = QPushButton("INITIALIZING...") 
+        self.btn_start.setFixedSize(400, 85)
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.setEnabled(False) # LOCKED
+        
+        # 2. Connect the Click Action
+        self.btn_start.clicked.connect(lambda: AudioManager.play("CLICK"))
+        self.btn_start.clicked.connect(self.start_game)
 
-        btn_start = QPushButton("START SESSION")
-        btn_start.setFixedSize(400, 85); btn_start.setCursor(Qt.PointingHandCursor)
-        # --- SOUND ---
-        btn_start.clicked.connect(lambda: AudioManager.play("CLICK"))
-        btn_start.clicked.connect(self.start_game)
-        btn_start.setStyleSheet("""
-            QPushButton { background-color: #a6e3a1; color: #1e1e2e; border: none; border-radius: 42px; font-size: 28px; font-weight: 900; }
-            QPushButton:hover { background-color: #94e28d; border: 4px solid #ffffff; }
-            QPushButton:pressed { background-color: #81c88b; }
+        # 3. Add Style for both Locked (Grey) and Unlocked (Green) states
+        self.btn_start.setStyleSheet("""
+            QPushButton { 
+                background-color: #45475a; 
+                color: #a6adc8; 
+                border: none; 
+                border-radius: 42px; 
+                font-size: 28px; 
+                font-weight: 900; 
+            }
+            QPushButton:enabled {
+                background-color: #a6e3a1; 
+                color: #1e1e2e; 
+            }
+            QPushButton:hover:enabled { 
+                background-color: #94e28d; 
+                border: 4px solid #ffffff; 
+            }
+            QPushButton:pressed { 
+                background-color: #81c88b; 
+            }
         """)
 
+        # 4. Back Button
         btn_back = QPushButton("BACK")
-        btn_back.setFixedSize(160, 55); btn_back.setCursor(Qt.PointingHandCursor)
-        # --- SOUND ---
+        btn_back.setFixedSize(160, 55)
+        btn_back.setCursor(Qt.PointingHandCursor)
         btn_back.clicked.connect(lambda: AudioManager.play("EXIT"))
         btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
         btn_back.setStyleSheet("""
@@ -1172,13 +1363,22 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
         """)
 
+        # 5. Add to Layout
         layout.addStretch(1)
-        layout.addWidget(self.lbl_mode); layout.addSpacing(30)
-        layout.addWidget(lbl_diff_title); layout.addSpacing(10); layout.addLayout(diff_layout)
+        layout.addWidget(self.lbl_mode)
         layout.addSpacing(30)
-        layout.addWidget(lbl_time_title); layout.addSpacing(10); layout.addLayout(time_layout)
+        layout.addWidget(lbl_diff_title)
+        layout.addSpacing(10)
+        layout.addLayout(diff_layout)
+        layout.addSpacing(30)
+        layout.addWidget(lbl_time_title)
+        layout.addSpacing(10)
+        layout.addLayout(time_layout)
         layout.addSpacing(50)
-        layout.addWidget(btn_start, 0, Qt.AlignCenter); layout.addSpacing(20)
+        
+        # CRITICAL FIX: Add self.btn_start (the new one), not btn_start
+        layout.addWidget(self.btn_start, 0, Qt.AlignCenter) 
+        layout.addSpacing(20)
         layout.addWidget(btn_back, 0, Qt.AlignCenter)
         layout.addStretch(1)
 
@@ -1544,7 +1744,7 @@ class MainWindow(QMainWindow):
         painter.setPen(QColor(255, 255, 0)) 
         font = QFont("Arial", 40, QFont.Bold)
         painter.setFont(font)
-        painter.drawText(loading_pixmap.rect(), Qt.AlignCenter, "LOADING CAMERA...")
+        painter.drawText(loading_pixmap.rect(), Qt.AlignCenter, "LOADING...")
         painter.end()
         self.video_label.setPixmap(loading_pixmap)
         QApplication.processEvents()
@@ -1561,11 +1761,14 @@ class MainWindow(QMainWindow):
         self.video_label.setPixmap(error_pixmap)
 
     def start_game(self):
+        # 1. Reset Game Data
         self.game_engine.reset()
-        self.show_loading_screen()
-        # Change 3 to 4, because Instructions is now 3
+        
+        # 2. Switch to Game Screen immediately
+        # (The camera video is already running in the background)
         self.central_widget.setCurrentIndex(4) 
         
+        # 3. Enable the AI logic
         if self.worker:
             self.worker.is_game_active = True
 
@@ -1628,8 +1831,28 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.showFullScreen()
+
+    # 1. Create Splash Screen
+    splash = LoadingScreen()
+    splash.showFullScreen() # <--- CHANGED THIS TO FULL SCREEN
+
+    # 2. Create Loader Thread
+    loader = GameLoader()
+
+    # 3. Define function to Start Game after loading
+    def start_game(inferencer, game_engine):
+        global window 
+        window = MainWindow(inferencer, game_engine)
+        window.showFullScreen()
+        splash.close()
+
+    # 4. Connect Signals
+    loader.progress.connect(splash.update_progress)
+    loader.finished.connect(start_game)
+
+    # 5. Start Loading
+    loader.start()
+
     sys.exit(app.exec_())
 
 
