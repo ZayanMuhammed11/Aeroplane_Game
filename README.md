@@ -15,9 +15,9 @@ Built with Python, **OpenMMLab (MMPose)**, **PyQt5**, and **Pygame**.
 * **Instant Feedback:** Visual cues guide you to correct your posture (e.g., "Keep Back Straight", "Bend Knees","Recalibrate").
 
 ---
-Click the below link to download the Aeroplane Game exe file
+Click the below link to download the Aeroplane Game setup file
 
-[Click here](https://drive.google.com/drive/folders/16J_Gc7fQvvzFtJDKhLxjKSkpFe0jGCLr?usp=drive_link)
+[Click here](https://drive.google.com/file/d/1ImgLEtoOs3-PzvtLoUJMYvQzEA1S9OK9/view?usp=sharing)
 
 
 > **Note:** The Game will take around 1 minute to load.Make sure that the system is connected to internet during the first opening of the game.
