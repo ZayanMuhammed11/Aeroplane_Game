@@ -17,10 +17,10 @@ Built with Python, **OpenMMLab (MMPose)**, **PyQt5**, and **Pygame**.
 ---
 Click the below link to download the Aeroplane Game setup file
 
-[Click here](https://drive.google.com/file/d/1ImgLEtoOs3-PzvtLoUJMYvQzEA1S9OK9/view?usp=sharing)
+[Click here](https://drive.google.com/file/d/1ZuqtQHsy2HelfOIuoP-KsdCl8r-h0rPd/view?usp=sharing)
 
 
-> **Note:** The Game will take around 1 minute to load.Make sure that the system is connected to internet during the first opening of the game.
+> **Note:** The Game will take around 1 minute to load.
 During the gameplay make sure that no other person or object is inside the calibration box.
 
 ### Prerequisites
