@@ -1,5 +1,18 @@
 import sys
 import os
+
+# ============================================================
+# ============== FORCE OFFLINE MODEL CACHE ==================
+# ============================================================
+if hasattr(sys, "_MEIPASS"):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+os.environ["OPENMMLAB_CACHE_DIR"] = os.path.join(BASE_DIR, "openmmlab_cache")
+os.environ["TORCH_HOME"] = os.path.join(BASE_DIR, "openmmlab_cache")
+# ============================================================
+
 import cv2
 import numpy as np
 import torch
@@ -598,7 +611,7 @@ class GameEngine:
             cv2.putText(frame, self.feedback_text, (center_x + 2, center_y + 2), cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness)
             cv2.putText(frame, self.feedback_text, (center_x, center_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.feedback_color, thickness)
 
-    # --- HELPER: DRAW ZONES (Missing Function) ---
+    # --- HELPER: DRAW ZONES 
     def draw_zone_highlight(self, frame, w, h, x1, x2):
         # Flashing effect every 10 frames
         if (self.frame_counter // 10) % 2 == 0:
@@ -927,9 +940,12 @@ class GameLoader(QThread):
         self.progress.emit(30, "Loading AI Brain (MMPose)...")
         try:
             inferencer = MMPoseInferencer(
-                pose2d="human",
+                "human",
                 device=DEVICE
             )
+            # This ensures the game doesn't lag on the first frame
+            dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+            _ = next(inferencer(dummy, show=False), None)
         except Exception as e:
             print(f"Error loading AI: {e}")
             inferencer = None
@@ -1854,6 +1870,3 @@ if __name__ == "__main__":
     loader.start()
 
     sys.exit(app.exec_())
-
-
-
