@@ -4,15 +4,11 @@ import shutil
 import sys
 
 # --- CONFIGURATION ---
-SCRIPT_NAME = "game5.py"   
+SCRIPT_NAME = "game.py"   
 EXE_NAME = "Aeroplane Game" 
 ICON_NAME = "icon.ico"    
 
-# --- SAFETY CHECK: MODELS FOLDER ---
-if not os.path.exists("models"):
-    print("\n[ERROR] 'models' folder NOT found!")
-    print("Please run 'get_models.py' first to download the offline AI files.")
-    sys.exit(1)
+
 
 # --- CLEAN PREVIOUS BUILDS ---
 if os.path.exists("build"): 
@@ -50,8 +46,11 @@ PyInstaller.__main__.run([
     # --- INCLUDE ASSETS ---
     # Syntax: 'source_folder;destination_folder'
     '--add-data=pics;pics',       # Images
-    '--add-data=models;models',   # <--- NEW: AI BRAIN (OFFLINE FILES)
     
+    '--add-data=openmmlab_cache;openmmlab_cache',
+
+
+
     # --- COLLECT AI LIBRARIES ---
     '--collect-all=mmpose',
     '--collect-all=mmdet',
