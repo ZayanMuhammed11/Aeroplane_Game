@@ -1,5 +1,6 @@
 import sys
 import os
+import ctypes
 
 # ============================================================
 # ============== FORCE OFFLINE MODEL CACHE ==================
@@ -57,10 +58,11 @@ CV_COLOR_RED = (0, 0, 255)
 CV_COLOR_GREEN = (0, 255, 0)
 CV_COLOR_YELLOW = (0, 255, 255)
 CV_COLOR_GREY = (100, 100, 100)
+CV_COLOR_ORANGE = (0, 140, 255)
 
 # --- RULES ---
-STRICT_KNEE_THRESHOLD = 0.95
-MAX_KNEE_ANGLE = 170.0       
+STRICT_KNEE_THRESHOLD = 0.98
+MAX_KNEE_ANGLE = 175.0       
 MAX_TRUNK_LEAN = 25.0        
 CALIB_DURATION = 3.0         
 MOVEMENT_THRESHOLD = 10.0
@@ -217,8 +219,8 @@ class GameEngine:
         self.time_left = self.duration
         
         # --- NEW: PLANE LIST MANAGEMENT ---
-        self.planes = []  # List of dicts: {'x': float, 'y': float, 'scored': bool}
-        self.spawn_timer = 0.0 # To control spawn rate if needed
+        self.planes = []  
+        self.spawn_timer = 0.0 
         self.calibrated_spawn_y = 0.0
         # ----------------------------------
         self.locked_user_center = None 
@@ -231,13 +233,18 @@ class GameEngine:
         self.is_altitude_locked = False
         self.smooth_shoulder_width = 0.0
         self.smooth_ankle_y = 0.0
-        
+        # We calculate speed as a % of screen width. 
+        # This guarantees the game feels the SAME on 720p, 1080p, or 4K.
+        # To change the planes speed in levels change the CAM_WIDTH multiplier below.
         if self.difficulty == 1:
-            self.plane_speed = 12; self.difficulty_offset = 40
+            self.plane_speed = CAM_WIDTH * 0.08
+            self.difficulty_offset = 20
         elif self.difficulty == 2:
-            self.plane_speed = 18; self.difficulty_offset = 85
+            self.plane_speed = CAM_WIDTH * 0.11
+            self.difficulty_offset = 40
         elif self.difficulty == 3:
-            self.plane_speed = 25; self.difficulty_offset = 125
+            self.plane_speed = CAM_WIDTH * 0.14
+            self.difficulty_offset = 85
     # --- CALCULATIONS ---
     def get_stable_head_y(self, kps):
         points = [kps[i][1] for i in range(5) if kps[i][1] > 0]
@@ -474,7 +481,7 @@ class GameEngine:
                         self.planes.append({'x': -50, 'y': self.calibrated_spawn_y, 'scored': False, 'scored_time': 0.0, 'has_spawned_next': False})
 
                     for plane in self.planes[:]:
-                        plane['x'] += self.plane_speed
+                        plane['x'] += self.plane_speed * dt
                         if plane['scored']: plane['scored_time'] += dt
                         self.flight_altitude = plane['y'] 
                         if w//2 - 50 < plane['x'] < w//2 + 50:
@@ -536,7 +543,18 @@ class GameEngine:
                             else:
                                 # User needs to move
                                 self.zone_hold_timer = 0.0
-                                if self.message_timer <= 0: self.feedback_text = f"MOVE TO {self.target_zone}!"; self.feedback_color = CV_COLOR_YELLOW
+                                if self.message_timer <= 0: 
+                                    # --- CUSTOM MESSAGES UPDATED ---
+                                    if self.target_zone == "CENTER":
+                                        self.feedback_text = "MOVE TO CENTRE BOX"
+                                    elif self.target_zone == "LEFT":
+                                        # CHANGED: "MOVE ONE STEP LEFT" -> "MOVE TO LEFT"
+                                        self.feedback_text = "MOVE TO LEFT"
+                                    elif self.target_zone == "RIGHT":
+                                        # CHANGED: "MOVE ONE STEP RIGHT" -> "MOVE TO RIGHT"
+                                        self.feedback_text = "MOVE TO RIGHT"
+                                    
+                                    self.feedback_color = CV_COLOR_YELLOW
                             
                             self.draw_zone_highlight(frame, w, h, x1, x2)
 
@@ -553,7 +571,7 @@ class GameEngine:
 
                     # 4. UPDATE & COLLISION
                     for plane in self.planes[:]:
-                        plane['x'] += self.plane_speed
+                        plane['x'] += self.plane_speed * dt
                         if plane['scored']: plane['scored_time'] += dt
                         
                         self.flight_altitude = plane['y'] 
@@ -613,18 +631,20 @@ class GameEngine:
 
     # --- HELPER: DRAW ZONES 
     def draw_zone_highlight(self, frame, w, h, x1, x2):
-        # Flashing effect every 10 frames
-        if (self.frame_counter // 10) % 2 == 0:
-            overlay = frame.copy()
-            if self.target_zone == "LEFT": 
-                cv2.rectangle(overlay, (0, 0), (x1, h), CV_COLOR_YELLOW, -1)
-            elif self.target_zone == "RIGHT": 
-                cv2.rectangle(overlay, (x2, 0), (w, h), CV_COLOR_YELLOW, -1)
-            else: # CENTER
-                cv2.rectangle(overlay, (x1, 0), (x2, h), CV_COLOR_YELLOW, -1)
-            
-            # Apply transparent overlay (alpha blending)
-            cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
+        # REMOVED the flashing condition: if (self.frame_counter // 10) % 2 == 0:
+        # Now it draws continuously until the state changes.
+        
+        overlay = frame.copy()
+        
+        if self.target_zone == "LEFT": 
+            cv2.rectangle(overlay, (0, 0), (x1, h), CV_COLOR_ORANGE, -1)
+        elif self.target_zone == "RIGHT": 
+            cv2.rectangle(overlay, (x2, 0), (w, h), CV_COLOR_ORANGE, -1)
+        else: # CENTER
+            cv2.rectangle(overlay, (x1, 0), (x2, h), CV_COLOR_ORANGE, -1)
+        
+        # Apply transparent overlay (alpha blending)
+        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
 
     def pick_new_target(self):
         # 1. Define all possible targets
@@ -672,23 +692,64 @@ class GameEngine:
                     frame[y1:y2, x1:x2] = roi
 
     def resolve_collision_strict(self, kps):
-        current_head_y = self.get_stable_head_y(kps); is_under_line = current_head_y > self.flight_altitude
-        l_angle = self.get_knee_angle(kps, "LEFT"); r_angle = self.get_knee_angle(kps, "RIGHT"); avg_knee_angle = (l_angle + r_angle) / 2.0
+        current_head_y = self.get_stable_head_y(kps)
+        is_under_line = current_head_y > self.flight_altitude
+        
+        # Calculate Form Metrics (We still calculate them, but might ignore them)
+        l_angle = self.get_knee_angle(kps, "LEFT")
+        r_angle = self.get_knee_angle(kps, "RIGHT")
+        avg_knee_angle = (l_angle + r_angle) / 2.0
         is_knees_physically_bent = avg_knee_angle < MAX_KNEE_ANGLE
-        compression_ratio = self.get_leg_compression_ratio(kps); is_ratio_good = compression_ratio < STRICT_KNEE_THRESHOLD
+        
+        compression_ratio = self.get_leg_compression_ratio(kps)
+        is_ratio_good = compression_ratio < STRICT_KNEE_THRESHOLD
         is_valid_squat = is_ratio_good and is_knees_physically_bent
-        trunk_angle = self.calculate_trunk_angle(kps); is_upright = trunk_angle < MAX_TRUNK_LEAN
-        s_mid_y = (kps[LEFT_SHOULDER][1] + kps[RIGHT_SHOULDER][1]) / 2.0; h_mid_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0; current_torso_len = abs(h_mid_y - s_mid_y)
+        
+        trunk_angle = self.calculate_trunk_angle(kps)
+        is_upright = trunk_angle < MAX_TRUNK_LEAN
+        
+        s_mid_y = (kps[LEFT_SHOULDER][1] + kps[RIGHT_SHOULDER][1]) / 2.0
+        h_mid_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0
+        current_torso_len = abs(h_mid_y - s_mid_y)
         is_torso_valid = current_torso_len > (self.base_torso_length * MIN_TORSO_RATIO)
-        current_hip_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0; hip_drop = current_hip_y - self.virtual_standing_hip_y
-        required_drop = self.difficulty_offset * self.current_scale * HIP_DROP_RATIO; is_hip_dropped = hip_drop > required_drop
-        self.score_total += 1; self.plane_scored = True 
-        if not is_under_line: self.trigger_message("HIT! DUCK LOWER", CV_COLOR_RED); AudioManager.play("HIT")
+        
+        current_hip_y = (kps[LEFT_HIP][1] + kps[RIGHT_HIP][1]) / 2.0
+        hip_drop = current_hip_y - self.virtual_standing_hip_y
+        required_drop = self.difficulty_offset * self.current_scale * HIP_DROP_RATIO
+        is_hip_dropped = hip_drop > required_drop
+
+        self.score_total += 1
+        self.plane_scored = True 
+        
+        # --- COLLISION LOGIC ---
+        if not is_under_line: 
+            self.trigger_message("HIT! DUCK LOWER", CV_COLOR_RED)
+            AudioManager.play("HIT")
         else:
-            if not is_valid_squat: self.trigger_message("HIT! BEND YOUR KNEES", CV_COLOR_RED); AudioManager.play("HIT")
-            elif not is_upright: self.trigger_message("HIT! KEEP BACK STRAIGHT", CV_COLOR_RED); AudioManager.play("HIT")
-            elif not is_torso_valid and not is_hip_dropped: self.trigger_message("HIT! DON'T LEAN FORWARD", CV_COLOR_RED); AudioManager.play("WARNING")
-            else: self.score_dodged += 1; self.trigger_message("PERFECT DODGE!", CV_COLOR_GREEN); AudioManager.play("SUCCESS")
+            # === FIX: RELAX RULES FOR EASY MODE ===
+            if self.difficulty == 1:
+                # In Easy mode, if they are under the line, it's a WIN.
+                # We ignore strict knee/back checks to make it patient-friendly.
+                self.score_dodged += 1
+                self.trigger_message("PERFECT DODGE!", CV_COLOR_GREEN)
+                AudioManager.play("SUCCESS")
+                return
+            # ======================================
+
+            # For Medium/Hard, we keep the strict checks:
+            if not is_valid_squat: 
+                self.trigger_message("HIT! BEND YOUR KNEES", CV_COLOR_RED)
+                AudioManager.play("HIT")
+            elif not is_upright: 
+                self.trigger_message("HIT! KEEP BACK STRAIGHT", CV_COLOR_RED)
+                AudioManager.play("HIT")
+            elif not is_torso_valid and not is_hip_dropped: 
+                self.trigger_message("HIT! DON'T LEAN FORWARD", CV_COLOR_RED)
+                AudioManager.play("WARNING")
+            else: 
+                self.score_dodged += 1
+                self.trigger_message("PERFECT DODGE!", CV_COLOR_GREEN)
+                AudioManager.play("SUCCESS")
 
     def trigger_message(self, text, color): self.feedback_text = text; self.feedback_color = color; self.message_timer = 2.0
     
@@ -1013,11 +1074,11 @@ class MainWindow(QMainWindow):
             else:
                 self.showFullScreen()
 
-    # --- NEW: LANDING PAGE (HORIZONTAL BUTTONS) ---
+    # --- NEW: LANDING PAGE
     def init_landing_screen(self):
         page = QWidget()
         
-        # Background
+        # --- 1. Background Setup (EXACTLY PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1031,16 +1092,14 @@ class MainWindow(QMainWindow):
         else:
             page.setStyleSheet("background-color: #0d1b2a;")
 
-        # Layouts
+        # --- 2. Layouts (MODIFIED FOR NEW POSITIONS) ---
         main_layout = QVBoxLayout()
-        main_layout.setAlignment(Qt.AlignBottom | Qt.AlignCenter)
-        main_layout.setContentsMargins(0, 0, 0, 150)
-
-        button_layout = QHBoxLayout()
-        button_layout.setSpacing(50)
-        button_layout.setAlignment(Qt.AlignCenter)
-
         
+        # Left=30, Top=30 (for Exit), Right=30, Bottom=150 (Keeps Play button at original height)
+        # We added 30px to Top/Right so the Exit button isn't glued to the screen edge.
+        main_layout.setContentsMargins(0, 20, 0, 150)
+
+        # --- 3. Button Style (EXACTLY PRESERVED) ---
         LANDING_BTN_STYLE = """
             QPushButton {
                 background-color: transparent;
@@ -1063,45 +1122,54 @@ class MainWindow(QMainWindow):
             }
         """
 
-        # Play Button
-        btn_play = QPushButton()
-        btn_play.setFixedSize(350, 140)
-        btn_play.setStyleSheet(LANDING_BTN_STYLE)
-        path_play = get_asset_path("play.png")
-        if os.path.exists(path_play):
-            btn_play.setIcon(QIcon(path_play))
-            btn_play.setIconSize(QSize(330, 120))
-        else:
-            btn_play.setText("PLAY")
-
-        # Exit Button
+        # --- 4. EXIT BUTTON (MOVED TO TOP RIGHT) ---
+        # We create this first so we can place it at the top
         btn_exit = QPushButton()
-        btn_exit.setFixedSize(350, 140)
+        btn_exit.setFixedSize(190, 90)
         btn_exit.setStyleSheet(LANDING_BTN_STYLE)
         path_exit = get_asset_path("exit.png")
         if os.path.exists(path_exit):
             btn_exit.setIcon(QIcon(path_exit))
-            btn_exit.setIconSize(QSize(330, 120))
+            btn_exit.setIconSize(QSize(170, 70))
         else:
             btn_exit.setText("EXIT")
-
-        # Logic
-        btn_play.clicked.connect(lambda: AudioManager.play("CLICK"))
-        btn_play.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
         
         btn_exit.clicked.connect(lambda: AudioManager.play("EXIT")) 
         btn_exit.clicked.connect(self.close)
 
-        button_layout.addWidget(btn_play)
-        button_layout.addWidget(btn_exit)
-        main_layout.addLayout(button_layout)
+        # Add to Layout: Align RIGHT and TOP
+        main_layout.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
+
+        # --- 5. SPACER (THE SEPARATOR) ---
+        # This invisible spring pushes Exit up and Play down
+        main_layout.addStretch()
+
+        # --- 6. PLAY BUTTON (KEPT AT BOTTOM CENTER) ---
+        btn_play = QPushButton()
+        btn_play.setFixedSize(380, 160)
+        btn_play.setStyleSheet(LANDING_BTN_STYLE)
+        path_play = get_asset_path("play.png")
+        if os.path.exists(path_play):
+            btn_play.setIcon(QIcon(path_play))
+            btn_play.setIconSize(QSize(350, 140))
+        else:
+            btn_play.setText("PLAY")
+
+        # Logic preserved
+        btn_play.clicked.connect(lambda: AudioManager.play("CLICK"))
+        btn_play.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
+
+        # Add to Layout: Align CENTER and BOTTOM
+        main_layout.addWidget(btn_play, 0, Qt.AlignCenter | Qt.AlignBottom)
+
+        # --- 7. Finalize ---
         page.setLayout(main_layout)
         self.central_widget.addWidget(page)
 
     def init_menu_screen(self):
         page = QWidget()
         
-        # 1. Background Image Setup
+        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         bg_path = get_asset_path("bg2.png")
@@ -1114,29 +1182,86 @@ class MainWindow(QMainWindow):
         else:
             page.setStyleSheet("background-color: #1e1e2e;") 
 
-        # 2. Main Layout (Centers the Container)
+        # --- 2. Main Layout ---
         main_layout = QVBoxLayout()
-        main_layout.setAlignment(Qt.AlignCenter)
+        main_layout.setContentsMargins(30, 20, 30, 30)
 
-        # 3. THE CONTAINER BOX
+        # --- 3. Shared Button Style ---
+        LANDING_BTN_STYLE = """
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                padding-top: 10px;
+                padding-bottom: 0px;
+            }
+            QPushButton:hover {
+                padding-top: 0px;
+                padding-bottom: 10px;
+            }
+            QPushButton:pressed {
+                padding-top: 15px;
+                padding-bottom: 0px;
+                border-bottom: none;
+            }
+        """
+
+        # --- 4. TOP BAR (Back & Exit Buttons) ---
+        top_bar_layout = QHBoxLayout()
+
+        # [BACK BUTTON] - Top Left
+        btn_back = QPushButton()
+        btn_back.setFixedSize(190, 90) 
+        btn_back.setStyleSheet(LANDING_BTN_STYLE)
+        
+        path_back = get_asset_path("back.png")
+        if os.path.exists(path_back):
+            btn_back.setIcon(QIcon(path_back))
+            btn_back.setIconSize(QSize(170, 70))
+        else:
+            btn_back.setText("BACK")
+            
+        btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
+        
+        # === CHANGE 1: Redirect to Instructions (Index 1) ===
+        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
+
+        # [EXIT BUTTON] - Top Right
+        btn_exit = QPushButton()
+        btn_exit.setFixedSize(190, 90)
+        btn_exit.setStyleSheet(LANDING_BTN_STYLE)
+        
+        path_exit = get_asset_path("exit.png")
+        if os.path.exists(path_exit):
+            btn_exit.setIcon(QIcon(path_exit))
+            btn_exit.setIconSize(QSize(170, 70))
+        else:
+            btn_exit.setText("EXIT")
+            
+        btn_exit.clicked.connect(lambda: AudioManager.play("EXIT"))
+        btn_exit.clicked.connect(self.close)
+
+        top_bar_layout.addWidget(btn_back, 0, Qt.AlignLeft | Qt.AlignTop)
+        top_bar_layout.addStretch() 
+        top_bar_layout.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
+
+        main_layout.addLayout(top_bar_layout)
+
+        # --- 5. THE MENU BOX (Center) ---
         menu_box = QFrame()
-        menu_box.setFixedSize(600, 650) # Big enough to hold title and 3 buttons
+        menu_box.setFixedSize(600, 500) 
         menu_box.setStyleSheet("""
             QFrame {
-                background-color: rgba(30, 30, 46, 0.90); /* Dark Semi-Transparent BG */
-                border: 4px solid #89b4fa; /* Blue Border */
+                background-color: rgba(30, 30, 46, 0.90); 
+                border: 4px solid #89b4fa; 
                 border-radius: 40px;
             }
         """)
 
-        # Layout inside the box
         box_layout = QVBoxLayout(menu_box)
         box_layout.setAlignment(Qt.AlignCenter)
-        box_layout.setSpacing(30) # Spacing between buttons
+        box_layout.setSpacing(30) 
 
         # --- STYLES ---
-
-        # Title Style (Transparent background, just text)
         TITLE_STYLE = """
             QLabel {
                 border: none;
@@ -1148,10 +1273,9 @@ class MainWindow(QMainWindow):
             }
         """
 
-        # Mode Buttons Style (Blue Theme)
         BTN_MODE_STYLE = """
             QPushButton {
-                background-color: rgba(49, 50, 68, 0.5); /* Slightly transparent inside box */
+                background-color: rgba(49, 50, 68, 0.5); 
                 color: #cdd6f4;
                 border: 3px solid #89b4fa;
                 border-radius: 20px;
@@ -1170,73 +1294,41 @@ class MainWindow(QMainWindow):
             }
         """
 
-        # Back Button Style (Pink Theme)
-        BTN_BACK_STYLE = """
-            QPushButton {
-                background-color: rgba(49, 50, 68, 0.5);
-                color: #f38ba8;
-                border: 3px solid #f38ba8;
-                border-radius: 20px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 24px;
-                font-weight: 900;
-                padding: 10px;
-            }
-            QPushButton:hover {
-                background-color: #f38ba8;
-                color: #1e1e2e;
-            }
-            QPushButton:pressed {
-                background-color: #d97e9c;
-            }
-        """
-
         # --- UI ELEMENTS ---
-
-        # Title
         title = QLabel("SELECT MODE")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet(TITLE_STYLE)
 
-        # Stationary Mode Button
         btn_stat = QPushButton("STATIONARY MODE")
-        btn_stat.setFixedSize(450, 90) # Wider to fill box nicely
+        btn_stat.setFixedSize(450, 90) 
         btn_stat.setCursor(Qt.PointingHandCursor)
         btn_stat.setStyleSheet(BTN_MODE_STYLE)
-        # Sound & Action
         btn_stat.clicked.connect(lambda: AudioManager.play("CLICK"))
         btn_stat.clicked.connect(lambda: self.go_to_settings("STATIONARY"))
 
-        # Sideways Mode Button
         btn_side = QPushButton("SIDEWAYS MODE")
         btn_side.setFixedSize(450, 90)
         btn_side.setCursor(Qt.PointingHandCursor)
         btn_side.setStyleSheet(BTN_MODE_STYLE)
-        # Sound & Action
         btn_side.clicked.connect(lambda: AudioManager.play("CLICK"))
         btn_side.clicked.connect(lambda: self.go_to_settings("SIDEWAYS"))
-
-        # Back Button
-        btn_exit = QPushButton("BACK")
-        btn_exit.setFixedSize(300, 80)
-        btn_exit.setCursor(Qt.PointingHandCursor)
-        btn_exit.setStyleSheet(BTN_BACK_STYLE)
-        # Sound & Action
-        btn_exit.clicked.connect(lambda: AudioManager.play("EXIT"))
-        btn_exit.clicked.connect(lambda: self.central_widget.setCurrentIndex(0)) 
 
         # --- ASSEMBLY ---
         box_layout.addStretch(1)
         box_layout.addWidget(title, 0, Qt.AlignCenter)
-        box_layout.addSpacing(40)
+        box_layout.addSpacing(20)
         box_layout.addWidget(btn_stat, 0, Qt.AlignCenter)
         box_layout.addWidget(btn_side, 0, Qt.AlignCenter)
-        box_layout.addSpacing(40)
-        box_layout.addWidget(btn_exit, 0, Qt.AlignCenter)
         box_layout.addStretch(1)
 
-        # Add the box to the main layout
-        main_layout.addWidget(menu_box)
+        # === CHANGE 2: Perfect Centering ===
+        # We add a Stretch BEFORE the box to push it down from the top bar
+        main_layout.addStretch(1) 
+        
+        main_layout.addWidget(menu_box, 0, Qt.AlignCenter)
+        
+        # We add a Stretch AFTER the box to push it up from the bottom
+        main_layout.addStretch(1) 
         
         page.setLayout(main_layout)
         self.central_widget.addWidget(page)
@@ -1244,9 +1336,9 @@ class MainWindow(QMainWindow):
     def init_settings_screen(self):
         self.settings_page = QWidget()
 
+        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
         path_bg_settings = get_asset_path("bg2.png")
 
         if os.path.exists(path_bg_settings):
@@ -1257,156 +1349,237 @@ class MainWindow(QMainWindow):
         else:
             self.settings_page.setStyleSheet("background-color: #1e1e2e;")
 
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
-        layout.setSpacing(30)
+        # --- 2. Main Layout ---
+        main_layout = QVBoxLayout()
+        main_layout.setAlignment(Qt.AlignTop)
+        main_layout.setContentsMargins(30, 20, 30, 40)
+        main_layout.setSpacing(20)
 
+        # =================================================================
+        #    NANO BANANA STYLESHEET
+        # =================================================================
         self.settings_page.setStyleSheet("""
-            QPushButton[class="level_btn"] {
-                background-color: rgba(49, 50, 68, 0.9); color: #cdd6f4; border: 2px solid #89b4fa;
-                border-radius: 15px; font-family: 'Segoe UI', sans-serif; font-size: 20px; font-weight: 900; padding: 10px;
+            /* The Main curved container */
+            QFrame#ControlDeck {
+                background-color: rgba(30, 30, 46, 0.85);
+                border: 3px solid #89b4fa;
+                border-top-left-radius: 60px;
+                border-bottom-right-radius: 60px;
+                border-top-right-radius: 20px;
+                border-bottom-left-radius: 20px;
             }
-            QPushButton[class="level_btn"]:hover { background-color: #89b4fa; color: #1e1e2e; border: 3px solid #b4befe; }
-            QPushButton[class="level_btn"]:checked { background-color: #fab387; color: #1e1e2e; border: 3px solid #ffffff; }
-            
-            QPushButton[class="time_btn"] {
-                background-color: #313244; color: #cdd6f4; border-radius: 10px; font-weight: bold; border: 2px solid #45475a; font-size: 16px;
+
+            /* Inner Modules */
+            QFrame#ModuleBox {
+                background-color: rgba(20, 20, 35, 0.6);
+                border-radius: 30px;
+                padding: 20px;
             }
-            QPushButton[class="time_btn"]:hover { background-color: #45475a; border-color: #89b4fa; color: white; }
-            
+
             QLabel[class="header"] {
-                font-size: 18px; font-weight: bold; color: #cdd6f4; background-color: rgba(30,30,46,0.6); padding: 5px 15px; border-radius: 8px;
+                font-family: 'Segoe UI'; font-size: 22px; font-weight: 900; 
+                color: #cdd6f4; text-transform: uppercase; letter-spacing: 2px;
             }
+
+            /* --- DIFFICULTY BUTTONS (CUSTOM COLORS) --- */
+            QPushButton[class="level_btn"] {
+                background-color: rgba(0, 0, 0, 0.2); 
+                border-radius: 25px; font-family: 'Segoe UI Black'; font-size: 20px; padding: 5px;
+            }
+            
+            /* EASY (GREEN) */
+            QPushButton#BtnEasy { border: 2px solid #a6e3a1; color: #a6e3a1; }
+            QPushButton#BtnEasy:hover { background-color: rgba(166, 227, 161, 0.2); }
+            QPushButton#BtnEasy:checked { background-color: #a6e3a1; color: #1e1e2e; border: 3px solid white; qproperty-iconSize: 32px 32px; }
+
+            /* MEDIUM (ORANGE) */
+            QPushButton#BtnMed { border: 2px solid #fab387; color: #fab387; }
+            QPushButton#BtnMed:hover { background-color: rgba(250, 179, 135, 0.2); }
+            QPushButton#BtnMed:checked { background-color: #fab387; color: #1e1e2e; border: 3px solid white; qproperty-iconSize: 32px 32px; }
+
+            /* HARD (RED) */
+            QPushButton#BtnHard { border: 2px solid #f38ba8; color: #f38ba8; }
+            QPushButton#BtnHard:hover { background-color: rgba(243, 139, 168, 0.2); }
+            QPushButton#BtnHard:checked { background-color: #f38ba8; color: #1e1e2e; border: 3px solid white; qproperty-iconSize: 32px 32px; }
+
+            /* TIME BUTTONS */
+            QPushButton[class="time_btn"] {
+                background-color: rgba(250, 179, 135, 0.1); color: #fab387; border-radius: 25px; font-weight: 900; border: 2px solid #fab387; font-size: 24px;
+            }
+            QPushButton[class="time_btn"]:hover { background-color: rgba(250, 179, 135, 0.3); color: white; }
+            
+            /* Digital Clock Display */
+            QLabel#TimeDisplay {
+                font-family: 'Courier New', monospace; font-size: 48px; font-weight: bold; color: #fab387; 
+                background-color: #24273a; padding: 5px 20px; border-radius: 15px; border: 3px solid #fab387;
+            }
+
+            /* Floating Nav Buttons */
+            QPushButton.nav_btn { background-color: transparent; border: none; padding-top: 10px; }
+            QPushButton.nav_btn:hover { padding-top: 0px; padding-bottom: 10px; }
         """)
 
+        # --- 3. TOP BAR (Back & Exit) ---
+        top_bar = QHBoxLayout()
+        
+        btn_back = QPushButton(); btn_back.setFixedSize(190, 90)
+        btn_back.setProperty("class", "nav_btn")
+        if os.path.exists(get_asset_path("back.png")):
+            btn_back.setIcon(QIcon(get_asset_path("back.png"))); btn_back.setIconSize(QSize(170, 70))
+        else: btn_back.setText("BACK")
+        btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
+        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
+
+        btn_exit = QPushButton(); btn_exit.setFixedSize(190, 90)
+        btn_exit.setProperty("class", "nav_btn")
+        if os.path.exists(get_asset_path("exit.png")):
+            btn_exit.setIcon(QIcon(get_asset_path("exit.png"))); btn_exit.setIconSize(QSize(170, 70))
+        else: btn_exit.setText("EXIT")
+        btn_exit.clicked.connect(lambda: AudioManager.play("EXIT"))
+        btn_exit.clicked.connect(self.close)
+
+        top_bar.addWidget(btn_back, 0, Qt.AlignLeft | Qt.AlignTop)
+        top_bar.addStretch()
+        top_bar.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
+        main_layout.addLayout(top_bar)
+
+        main_layout.addStretch(1) # Spring 1
+
+        # --- 4. THE "NANO BANANA" CONTROL DECK (Now Includes Mode) ---
+        control_deck = QFrame()
+        control_deck.setObjectName("ControlDeck") 
+        control_deck.setFixedSize(1100, 600) # Increased height to fit Mode Banner
+        
+        # CHANGED: Deck is now Vertical to stack [Mode] over [Modules]
+        deck_layout_main = QVBoxLayout(control_deck)
+        deck_layout_main.setSpacing(10)
+        deck_layout_main.setContentsMargins(40, 30, 40, 40)
+
+        # A. MODE BANNER (Inside the Box)
         self.lbl_mode = QLabel("MODE: STATIONARY")
         self.lbl_mode.setAlignment(Qt.AlignCenter)
-        self.lbl_mode.setStyleSheet("font-size: 32px; font-weight: 900; color: #89b4fa; background-color: rgba(30,30,46,0.7); border-radius: 15px; padding: 10px 25px; border: 2px solid #89b4fa;")
+        self.lbl_mode.setStyleSheet("""
+            font-size: 28px; font-weight: 900; color: #1e1e2e; 
+            background-color: #89b4fa; 
+            border-radius: 15px; padding: 10px 40px; 
+            border: 3px solid #cdd6f4;
+        """)
+        deck_layout_main.addWidget(self.lbl_mode, 0, Qt.AlignCenter)
+        
+        deck_layout_main.addSpacing(10)
 
-        lbl_diff_title = QLabel("SELECT DIFFICULTY")
-        lbl_diff_title.setProperty("class", "header")
+        # B. MODULES CONTAINER (Horizontal)
+        modules_widget = QWidget()
+        modules_layout = QHBoxLayout(modules_widget)
+        modules_layout.setSpacing(40)
+        modules_layout.setContentsMargins(0,0,0,0)
+
+        # [LEFT MODULE: DIFFICULTY]
+        diff_module = QFrame(); diff_module.setObjectName("ModuleBox")
+        diff_layout_v = QVBoxLayout(diff_module)
+        diff_layout_v.setAlignment(Qt.AlignCenter) # Center content vertically
+        
+        lbl_diff_title = QLabel("LEVEL"); lbl_diff_title.setProperty("class", "header")
         lbl_diff_title.setAlignment(Qt.AlignCenter)
+        
+        # Difficulty Buttons Container
+        diff_btns_layout = QVBoxLayout()
+        diff_btns_layout.setSpacing(15)
+        diff_btns_layout.setAlignment(Qt.AlignCenter) # ALIGNMENT FIX
 
-        diff_layout = QHBoxLayout()
-        diff_layout.setSpacing(25)
-        diff_layout.setAlignment(Qt.AlignCenter)
+        self.btn_easy = QPushButton("EASY"); self.btn_med = QPushButton("MEDIUM"); self.btn_hard = QPushButton("HARD")
+        ids = ["BtnEasy", "BtnMed", "BtnHard"]
         
-        self.btn_easy = QPushButton("EASY (Lv 1)")
-        self.btn_med = QPushButton("MEDIUM (Lv 2)")
-        self.btn_hard = QPushButton("HARD (Lv 3)")
-        
-        for btn in [self.btn_easy, self.btn_med, self.btn_hard]:
-            btn.setFixedSize(220, 70); btn.setCheckable(True)
-            btn.setProperty("class", "level_btn"); btn.setCursor(Qt.PointingHandCursor)
-            # --- SOUND ---
+        for i, (btn, level) in enumerate([(self.btn_easy,1), (self.btn_med,2), (self.btn_hard,3)]):
+            btn.setFixedSize(350, 75); btn.setCheckable(True); btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("class", "level_btn")
+            btn.setObjectName(ids[i]) 
+            btn.clicked.connect(lambda checked, l=level: self.set_difficulty(l))
             btn.clicked.connect(lambda: AudioManager.play("LEVEL"))
-            diff_layout.addWidget(btn)
-        
-        self.btn_easy.clicked.connect(lambda: self.set_difficulty(1))
-        self.btn_med.clicked.connect(lambda: self.set_difficulty(2))
-        self.btn_hard.clicked.connect(lambda: self.set_difficulty(3))
+            diff_btns_layout.addWidget(btn)
 
-        lbl_time_title = QLabel("SESSION DURATION")
-        lbl_time_title.setProperty("class", "header")
+        diff_layout_v.addWidget(lbl_diff_title)
+        diff_layout_v.addSpacing(20)
+        diff_layout_v.addLayout(diff_btns_layout)
+        
+        # [RIGHT MODULE: TIME]
+        time_module = QFrame(); time_module.setObjectName("ModuleBox")
+        time_module.setStyleSheet("border: 2px solid #fab387;") 
+        time_layout_v = QVBoxLayout(time_module)
+        time_layout_v.setAlignment(Qt.AlignCenter)
+
+        lbl_time_title = QLabel("DURATION TIMER"); lbl_time_title.setProperty("class", "header")
         lbl_time_title.setAlignment(Qt.AlignCenter)
+        lbl_time_title.setStyleSheet("color: #fab387;")
 
-        time_layout = QHBoxLayout()
-        time_layout.setAlignment(Qt.AlignCenter)
-        
-        btn_minus = QPushButton("- 1 Min")
-        btn_plus = QPushButton("+ 1 Min")
-        btn_minus.setProperty("class", "time_btn")
-        btn_plus.setProperty("class", "time_btn")
-        
-        self.lbl_time = QLabel("03:00")
-        self.lbl_time.setStyleSheet("font-family: 'Arial'; font-size: 42px; font-weight: bold; color: #fab387; background-color: rgba(0,0,0,0.6); padding: 5px 30px; border-radius: 12px; border: 2px solid #fab387;")
-        
-        # --- SOUND ---
-        btn_minus.clicked.connect(lambda: AudioManager.play("TIME"))
-        btn_plus.clicked.connect(lambda: AudioManager.play("TIME"))
+        # Time Controls
+        time_controls_layout = QVBoxLayout()
+        time_controls_layout.setSpacing(20)
+        time_controls_layout.setAlignment(Qt.AlignCenter)
 
-        btn_minus.clicked.connect(lambda: self.change_time(-60))
-        btn_plus.clicked.connect(lambda: self.change_time(60))
-        
-        for btn in [btn_minus, btn_plus]:
-             btn.setFixedSize(110, 55); btn.setCursor(Qt.PointingHandCursor)
+        # CHANGED: Initial Text has "min"
+        self.lbl_time = QLabel("03:00 min"); self.lbl_time.setObjectName("TimeDisplay")
+        self.lbl_time.setAlignment(Qt.AlignCenter)
 
-        time_layout.addWidget(btn_minus); time_layout.addSpacing(25)
-        time_layout.addWidget(self.lbl_time); time_layout.addSpacing(25)
-        time_layout.addWidget(btn_plus)
+        time_btns_h = QHBoxLayout()
+        btn_minus = QPushButton("-"); btn_plus = QPushButton("+")
+        for btn, change in [(btn_minus, -60), (btn_plus, 60)]:
+            btn.setFixedSize(80, 80); btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("class", "time_btn")
+            btn.clicked.connect(lambda: AudioManager.play("TIME"))
+            btn.clicked.connect(lambda _, ch=change: self.change_time(ch))
+            time_btns_h.addWidget(btn)
         
-        # 1. Create button in DISABLED (Grey) state initially
+        time_controls_layout.addWidget(self.lbl_time, 0, Qt.AlignCenter)
+        time_controls_layout.addLayout(time_btns_h)
+
+        time_layout_v.addWidget(lbl_time_title)
+        time_layout_v.addLayout(time_controls_layout)
+
+        # Add modules to container
+        modules_layout.addWidget(diff_module)
+        modules_layout.addWidget(time_module)
+        
+        # Add container to main deck
+        deck_layout_main.addWidget(modules_widget)
+        
+        main_layout.addWidget(control_deck, 0, Qt.AlignCenter)
+
+        main_layout.addStretch(1) # Spring 2
+
+        # --- 5. START IGNITION BUTTON ---
         self.btn_start = QPushButton("INITIALIZING...") 
-        self.btn_start.setFixedSize(400, 85)
+        self.btn_start.setFixedSize(450, 100) 
         self.btn_start.setCursor(Qt.PointingHandCursor)
-        self.btn_start.setEnabled(False) # LOCKED
-        
-        # 2. Connect the Click Action
+        self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(lambda: AudioManager.play("CLICK"))
         self.btn_start.clicked.connect(self.start_game)
 
-        # 3. Add Style for both Locked (Grey) and Unlocked (Green) states
         self.btn_start.setStyleSheet("""
             QPushButton { 
-                background-color: #45475a; 
-                color: #a6adc8; 
-                border: none; 
-                border-radius: 42px; 
-                font-size: 28px; 
-                font-weight: 900; 
+                background-color: #313244; color: #a6adc8; border: 4px solid #45475a; 
+                border-radius: 50px; font-size: 32px; font-weight: 900; letter-spacing: 2px;
             }
             QPushButton:enabled {
-                background-color: #a6e3a1; 
-                color: #1e1e2e; 
+                background-color: #a6e3a1; color: #1e1e2e; border: 4px solid #a6e3a1;
+                qproperty-shadow: "0px 0px 20px #a6e3a1"; 
             }
             QPushButton:hover:enabled { 
-                background-color: #94e28d; 
-                border: 4px solid #ffffff; 
+                background-color: #94e28d; border: 4px solid #ffffff;
             }
-            QPushButton:pressed { 
-                background-color: #81c88b; 
-            }
+            QPushButton:pressed { background-color: #81c88b; }
         """)
+        main_layout.addWidget(self.btn_start, 0, Qt.AlignCenter)
+        main_layout.addStretch(1) # Bottom Spring
 
-        # 4. Back Button
-        btn_back = QPushButton("BACK")
-        btn_back.setFixedSize(160, 55)
-        btn_back.setCursor(Qt.PointingHandCursor)
-        btn_back.clicked.connect(lambda: AudioManager.play("EXIT"))
-        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
-        btn_back.setStyleSheet("""
-            QPushButton { background-color: rgba(30, 30, 46, 0.8); color: #f38ba8; border: 3px solid #f38ba8; border-radius: 15px; font-weight: bold; font-size: 20px;}
-            QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
-        """)
-
-        # 5. Add to Layout
-        layout.addStretch(1)
-        layout.addWidget(self.lbl_mode)
-        layout.addSpacing(30)
-        layout.addWidget(lbl_diff_title)
-        layout.addSpacing(10)
-        layout.addLayout(diff_layout)
-        layout.addSpacing(30)
-        layout.addWidget(lbl_time_title)
-        layout.addSpacing(10)
-        layout.addLayout(time_layout)
-        layout.addSpacing(50)
-        
-        # CRITICAL FIX: Add self.btn_start (the new one), not btn_start
-        layout.addWidget(self.btn_start, 0, Qt.AlignCenter) 
-        layout.addSpacing(20)
-        layout.addWidget(btn_back, 0, Qt.AlignCenter)
-        layout.addStretch(1)
-
-        self.settings_page.setLayout(layout)
+        self.settings_page.setLayout(main_layout)
         self.central_widget.addWidget(self.settings_page)
         self.set_difficulty(1)
-
     # --- NEW: INSTRUCTIONS SCREEN (Scaled to Fit Box) ---
     def init_instructions_screen(self):
         self.instr_page = QWidget()
 
-        # 1. Background Setup
+        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         path_bg = get_asset_path("bg2.png")
@@ -1419,13 +1592,78 @@ class MainWindow(QMainWindow):
         else:
             self.instr_page.setStyleSheet("background-color: #1e1e2e;")
 
-        # 2. Main Layout
-        layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)
+        # --- 2. Main Layout ---
+        main_layout = QVBoxLayout()
+        # Adjusted margins: (Left, Top, Right, Bottom)
+        main_layout.setContentsMargins(30, 20, 30, 30)
 
-        # 3. Content Container
+        # --- 3. Shared Button Style (Floating Effect) ---
+        LANDING_BTN_STYLE = """
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                padding-top: 10px;
+                padding-bottom: 0px;
+            }
+            QPushButton:hover {
+                padding-top: 0px;
+                padding-bottom: 10px;
+            }
+            QPushButton:pressed {
+                padding-top: 15px;
+                padding-bottom: 0px;
+                border-bottom: none;
+            }
+        """
+
+        # --- 4. TOP BAR (Back & Exit Buttons) ---
+        top_bar_layout = QHBoxLayout()
+
+        # [BACK BUTTON] - Top Left
+        btn_back = QPushButton()
+        btn_back.setFixedSize(190, 90) 
+        btn_back.setStyleSheet(LANDING_BTN_STYLE)
+        
+        path_back = get_asset_path("back.png")
+        if os.path.exists(path_back):
+            btn_back.setIcon(QIcon(path_back))
+            btn_back.setIconSize(QSize(170, 70))
+        else:
+            btn_back.setText("BACK")
+            
+        btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
+        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(0))
+
+        # [EXIT BUTTON] - Top Right
+        btn_exit = QPushButton()
+        btn_exit.setFixedSize(190, 90)
+        btn_exit.setStyleSheet(LANDING_BTN_STYLE)
+        
+        path_exit = get_asset_path("exit.png")
+        if os.path.exists(path_exit):
+            btn_exit.setIcon(QIcon(path_exit))
+            btn_exit.setIconSize(QSize(170, 70))
+        else:
+            btn_exit.setText("EXIT")
+            
+        btn_exit.clicked.connect(lambda: AudioManager.play("EXIT"))
+        btn_exit.clicked.connect(self.close)
+
+        # Add to Layout: Back (Left) --- Stretch --- Exit (Right)
+        top_bar_layout.addWidget(btn_back, 0, Qt.AlignLeft | Qt.AlignTop)
+        top_bar_layout.addStretch() 
+        top_bar_layout.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
+
+        main_layout.addLayout(top_bar_layout)
+        
+        # --- 5. CONTENT BOX (Instructions) ---
         content_box = QFrame()
-        content_box.setFixedSize(1150, 700) 
+        
+        # === SIZE INCREASED HERE ===
+        # Old: (1150, 700) -> New: (1250, 800)
+        # This fits the 28px font comfortably
+        content_box.setFixedSize(1250, 800) 
+        
         content_box.setStyleSheet("""
             QFrame {
                 background-color: rgba(30, 30, 46, 0.95); 
@@ -1436,9 +1674,9 @@ class MainWindow(QMainWindow):
         
         box_layout = QVBoxLayout(content_box)
         box_layout.setSpacing(0)
-        box_layout.setContentsMargins(15, 25, 15, 20) 
+        box_layout.setContentsMargins(50, 30, 50, 30)
 
-        # Title Label
+        # Title (PRESERVED: 65px)
         lbl_title = QLabel("HOW TO PLAY")
         lbl_title.setAlignment(Qt.AlignCenter)
         lbl_title.setStyleSheet("""
@@ -1447,18 +1685,17 @@ class MainWindow(QMainWindow):
             font-family: 'Segoe UI';
             font-weight: 900;
             font-size: 65px;
-            margin-bottom: 5px; 
+            margin-bottom: 5px;
             border: none;
         """)
 
-        # Instructions Body Text
+        # Instructions Text (PRESERVED: 28px)
         lbl_instr = QLabel()
         lbl_instr.setWordWrap(True)
         lbl_instr.setTextFormat(Qt.RichText)
         lbl_instr.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         lbl_instr.setStyleSheet("border: none; background-color: transparent;")
         
-        # HTML Formatting (SCALED UP)
         instructions_html = """
         <div style='color: #cdd6f4; font-family: Segoe UI; font-size: 28px; line-height: 140%; text-align: left;'>
             <ul style='margin-left: 0px; padding-left: 10px; margin-top: 0px;'>
@@ -1466,13 +1703,13 @@ class MainWindow(QMainWindow):
                     <b style='color: #f9e2af;'>How to Win:</b> Perform perfect squats to avoid planes hitting you. Hits reduce your accuracy, so stay sharp!
                 </li>
                 <li style='margin-bottom: 20px;'>
-                    <b style='color: #a6e3a1;'>Setup:</b> Align yourself within the <b>Green Box</b>. The game auto-calibrates when you stand still,<i style='color:#f38ba8;'>Do not change position excessively.</i>
+                    <b style='color: #a6e3a1;'>Setup:</b> Align yourself within the <b>Green Box</b>. The game auto-calibrates when you stand still, <i style='color:#f38ba8;'>Do not change position excessively.</i>
                 </li>
                 <li style='margin-bottom: 20px;'>
                     <b>Stationary Mode:</b> Stand in place and <b>Squat</b> to avoid planes.
                 </li>
                 <li style='margin-bottom: 20px;'>
-                    <b>Sideways Mode:</b> Agility test! Quickly move to the highlighted <b>Left/Right</b> zone before squatting.
+                    <b>Sideways Mode:</b> Agility test! Quickly move to the highlighted <b>Left/Right</b> zone before squatting.Make one lateral step to the highlighted side, then squat to dodge incoming planes.
                 </li>
                 <li style='margin-bottom: 20px;'>
                     <b>Perfect Form:</b> The camera tracks your body. Keep your chest up and bend your knees while squatting. Avoid excessive movement or improper posture.
@@ -1482,23 +1719,7 @@ class MainWindow(QMainWindow):
         """
         lbl_instr.setText(instructions_html)
 
-        # 5. Buttons (Start & Back)
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(50)
-        btn_layout.setAlignment(Qt.AlignCenter)
-
-        # BACK BUTTON
-        btn_back = QPushButton("BACK")
-        btn_back.setFixedSize(240, 75)
-        btn_back.setCursor(Qt.PointingHandCursor)
-        btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
-        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(0))
-        btn_back.setStyleSheet("""
-            QPushButton { background-color: rgba(30, 30, 46, 0.5); color: #f38ba8; border: 3px solid #f38ba8; border-radius: 20px; font-weight: bold; font-size: 22px;}
-            QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
-        """)
-
-        # START BUTTON
+        # [START BUTTON] - Kept inside box at bottom center (PRESERVED STYLE)
         btn_start = QPushButton("START")
         btn_start.setFixedSize(240, 75)
         btn_start.setCursor(Qt.PointingHandCursor)
@@ -1510,17 +1731,15 @@ class MainWindow(QMainWindow):
             QPushButton:pressed { background-color: #81c88b; }
         """)
 
-        btn_layout.addWidget(btn_back)
-        btn_layout.addWidget(btn_start)
-
-        # Assemble
+        # Add Widgets to Box
         box_layout.addWidget(lbl_title)
-        box_layout.addWidget(lbl_instr, 1) 
-        box_layout.addLayout(btn_layout)
+        box_layout.addWidget(lbl_instr, 1)
+        box_layout.addWidget(btn_start, 0, Qt.AlignCenter) 
         
-        layout.addWidget(content_box)
-        self.instr_page.setLayout(layout)
-        
+        main_layout.addWidget(content_box, 0, Qt.AlignCenter)
+        main_layout.addStretch(1)
+
+        self.instr_page.setLayout(main_layout)
         self.central_widget.addWidget(self.instr_page)
     # --- UPDATED GAME SCREEN (Grouped Info Boxes) ---
     def init_game_screen(self):
@@ -1595,7 +1814,7 @@ class MainWindow(QMainWindow):
         info_layout.setSpacing(15) # Space between Success and Time
 
         # SUCCESS BOX
-        self.lbl_score = QLabel("SUCCESS: 0 / 0")
+        self.lbl_score = QLabel("SCORE: 0 / 0")
         self.lbl_score.setFixedSize(200, 60)
         self.lbl_score.setAlignment(Qt.AlignCenter)
         self.lbl_score.setStyleSheet(SCORE_STYLE)
@@ -1663,9 +1882,9 @@ class MainWindow(QMainWindow):
     def init_scorecard_screen(self):
         self.score_page = QWidget()
 
+        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
         path_bg_score = get_asset_path("bg2.png")
 
         if os.path.exists(path_bg_score):
@@ -1676,60 +1895,163 @@ class MainWindow(QMainWindow):
         else:
             self.score_page.setStyleSheet("background-color: #1e1e2e;")
 
+        # --- 2. Main Layout ---
         main_layout = QVBoxLayout()
-        main_layout.setAlignment(Qt.AlignCenter)
+        main_layout.setContentsMargins(30, 20, 30, 30)
 
+        # --- 3. Shared Button Style ---
+        LANDING_BTN_STYLE = """
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                padding-top: 10px;
+                padding-bottom: 0px;
+            }
+            QPushButton:hover {
+                padding-top: 0px;
+                padding-bottom: 10px;
+            }
+            QPushButton:pressed {
+                padding-top: 15px;
+                padding-bottom: 0px;
+                border-bottom: none;
+            }
+        """
+
+        # --- 4. TOP BAR (Back & Exit Buttons) ---
+        top_bar_layout = QHBoxLayout()
+
+        # [BACK BUTTON] - Redirects to Settings (Index 3)
+        btn_back = QPushButton()
+        btn_back.setFixedSize(190, 90) 
+        btn_back.setStyleSheet(LANDING_BTN_STYLE)
+        
+        path_back = get_asset_path("back.png")
+        if os.path.exists(path_back):
+            btn_back.setIcon(QIcon(path_back))
+            btn_back.setIconSize(QSize(170, 70))
+        else:
+            btn_back.setText("BACK")
+        
+        btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
+        btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(3))
+
+        # [EXIT BUTTON] - Closes App
+        btn_exit = QPushButton()
+        btn_exit.setFixedSize(190, 90)
+        btn_exit.setStyleSheet(LANDING_BTN_STYLE)
+        
+        path_exit = get_asset_path("exit.png")
+        if os.path.exists(path_exit):
+            btn_exit.setIcon(QIcon(path_exit))
+            btn_exit.setIconSize(QSize(170, 70))
+        else:
+            btn_exit.setText("EXIT")
+            
+        btn_exit.clicked.connect(lambda: AudioManager.play("EXIT"))
+        btn_exit.clicked.connect(self.close)
+
+        top_bar_layout.addWidget(btn_back, 0, Qt.AlignLeft | Qt.AlignTop)
+        top_bar_layout.addStretch() 
+        top_bar_layout.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
+
+        main_layout.addLayout(top_bar_layout)
+        main_layout.addStretch(1) 
+
+        # --- 5. SCORECARD BOX ---
         score_card_box = QFrame()
-        score_card_box.setFixedSize(700, 650) # Increased height slightly to fit new label
+        # Kept size at 750 as requested
+        score_card_box.setFixedSize(550, 580) 
         score_card_box.setStyleSheet("""
-            QFrame { background-color: rgba(30, 30, 46, 0.90); border: 4px solid #89b4fa; border-radius: 40px; }
+            QFrame { 
+                background-color: rgba(30, 30, 46, 0.90); 
+                border: 4px solid #89b4fa; 
+                border-radius: 40px; 
+            }
         """)
 
-        box_layout = QVBoxLayout(score_card_box); box_layout.setAlignment(Qt.AlignCenter); box_layout.setSpacing(15)
+        box_layout = QVBoxLayout(score_card_box)
+        box_layout.setAlignment(Qt.AlignCenter)
+        box_layout.setSpacing(10)
 
         lbl_title = QLabel("SESSION COMPLETE")
         lbl_title.setAlignment(Qt.AlignCenter)
         lbl_title.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 48px; font-weight: 900; color: #89b4fa;")
 
-        # DODGES (Green)
-        self.lbl_final_dodges = QLabel("SUCCESSFUL DODGES: 0")
+        # LABELS
+        self.lbl_final_dodges = QLabel("SCORE: 0")
         self.lbl_final_dodges.setAlignment(Qt.AlignCenter)
-        self.lbl_final_dodges.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 28px; font-weight: bold; color: #a6e3a1;")
+        self.lbl_final_dodges.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 32px; font-weight: bold; color: #a6e3a1;")
 
-        # HITS (Red)
-        self.lbl_final_hits = QLabel("HITS / MISTAKES: 0")
+        self.lbl_final_hits = QLabel("MISTAKES: 0")
         self.lbl_final_hits.setAlignment(Qt.AlignCenter)
-        self.lbl_final_hits.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 28px; font-weight: bold; color: #f38ba8;")
+        self.lbl_final_hits.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 32px; font-weight: bold; color: #f38ba8;")
 
-        # --- NEW: ACCURACY (Gold/Yellow) ---
         self.lbl_final_accuracy = QLabel("ACCURACY: 0.0%")
         self.lbl_final_accuracy.setAlignment(Qt.AlignCenter)
-        self.lbl_final_accuracy.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 32px; font-weight: 900; color: #f9e2af;")
+        self.lbl_final_accuracy.setStyleSheet("border: none; background-color: transparent; font-family: 'Segoe UI', sans-serif; font-size: 36px; font-weight: 900; color: #f9e2af;")
 
-        btn_exit_menu = QPushButton("EXIT TO MENU")
-        btn_exit_menu.setFixedSize(350, 80); btn_exit_menu.setCursor(Qt.PointingHandCursor)
+        # --- RESTART BUTTON (GREEN) ---
+        btn_restart = QPushButton("RESTART SESSION")
+        btn_restart.setFixedSize(350, 80)
+        btn_restart.setCursor(Qt.PointingHandCursor)
+        btn_restart.clicked.connect(lambda: AudioManager.play("CLICK"))
+        btn_restart.clicked.connect(self.start_game)
         
-        # --- SOUND ---
-        btn_exit_menu.clicked.connect(lambda: AudioManager.play("EXIT"))
-        btn_exit_menu.clicked.connect(lambda: self.central_widget.setCurrentIndex(2))
-        
-        btn_exit_menu.setStyleSheet("""
+        btn_restart.setStyleSheet("""
             QPushButton {
-                background-color: rgba(0,0,0,0.2); color: #f38ba8; border: 3px solid #f38ba8; 
+                background-color: #a6e3a1; color: #1e1e2e; border: none; 
                 border-radius: 20px; font-family: 'Segoe UI', sans-serif; font-weight: 900; font-size: 24px;
             }
-            QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
-            QPushButton:pressed { background-color: #d97e9c; border-color: #d97e9c; }
+            QPushButton:hover { background-color: #94e28d; border: 4px solid #ffffff; }
+            QPushButton:pressed { background-color: #81c88b; }
         """)
 
-        box_layout.addStretch(1); box_layout.addWidget(lbl_title); box_layout.addSpacing(30)
+        # --- BACK TO MENU BUTTON (PINK) ---
+        btn_menu = QPushButton("BACK TO MENU")
+        btn_menu.setFixedSize(350, 80)
+        btn_menu.setCursor(Qt.PointingHandCursor)
+        btn_menu.clicked.connect(lambda: AudioManager.play("EXIT"))
+        btn_menu.clicked.connect(lambda: self.central_widget.setCurrentIndex(2)) 
+        
+        btn_menu.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(30, 30, 46, 0.5); 
+                color: #f38ba8; 
+                border: 3px solid #f38ba8; 
+                border-radius: 20px; 
+                font-family: 'Segoe UI', sans-serif; 
+                font-weight: 900; 
+                font-size: 24px;
+            }
+            QPushButton:hover { background-color: #f38ba8; color: #1e1e2e; }
+            QPushButton:pressed { background-color: #d97e9c; }
+        """)
+
+        # Assemble Box
+        box_layout.addStretch(1)
+        box_layout.addWidget(lbl_title)
+        box_layout.addSpacing(20)
         box_layout.addWidget(self.lbl_final_dodges)
         box_layout.addWidget(self.lbl_final_hits)
-        box_layout.addSpacing(10)
-        box_layout.addWidget(self.lbl_final_accuracy) # Added here
-        box_layout.addSpacing(50); box_layout.addWidget(btn_exit_menu, 0, Qt.AlignCenter); box_layout.addStretch(1)
+        box_layout.addSpacing(5)
+        box_layout.addWidget(self.lbl_final_accuracy)
+        
+        # Reduced spacing here to make room for the gap between buttons
+        box_layout.addSpacing(20)
+        
+        box_layout.addWidget(btn_restart, 0, Qt.AlignCenter)
+        
+        # === ADDED SPACE HERE ===
+        box_layout.addSpacing(20) 
+        
+        box_layout.addWidget(btn_menu, 0, Qt.AlignCenter)
+        
+        box_layout.addStretch(1)
 
-        main_layout.addWidget(score_card_box)
+        main_layout.addWidget(score_card_box, 0, Qt.AlignCenter)
+        main_layout.addStretch(1)
+
         self.score_page.setLayout(main_layout)
         self.central_widget.addWidget(self.score_page)
 
@@ -1751,7 +2073,7 @@ class MainWindow(QMainWindow):
             self.game_engine.duration = new_time
             m = int(new_time // 60)
             s = int(new_time % 60)
-            self.lbl_time.setText(f"{m:02d}:{s:02d}")
+            self.lbl_time.setText(f"{m:02d}:{s:02d} min")
 
     def show_loading_screen(self):
         loading_pixmap = QPixmap(CAM_WIDTH, CAM_HEIGHT)
@@ -1790,7 +2112,7 @@ class MainWindow(QMainWindow):
 
     def restart_game_logic(self):
         self.game_engine.reset()
-        self.lbl_score.setText("SUCCESS: 0 / 0")
+        self.lbl_score.setText("SCORE: 0 / 0")
         
     def stop_game(self):
         # UPDATED: Just pause the existing worker
@@ -1799,25 +2121,24 @@ class MainWindow(QMainWindow):
         self.show_loading_screen()
 
     def game_finished(self):
-        # 1. CAPTURE SCORES FIRST
+        # 1. CAPTURE SCORES
         final_dodges = self.game_engine.score_dodged
         final_total = self.game_engine.score_total
         
-        # 2. STOP THE GAME ENGINE
+        # 2. STOP GAME
         self.stop_game()
 
         # 3. CALCULATE STATS
         hits = max(0, final_total - final_dodges)
         
-        # Calculate Accuracy
         if final_total > 0:
             accuracy = (final_dodges / final_total) * 100.0
         else:
             accuracy = 0.0
 
-        # 4. UPDATE UI
-        self.lbl_final_dodges.setText(f"SUCCESSFUL DODGES: {final_dodges}")
-        self.lbl_final_hits.setText(f"HITS / MISTAKES: {hits}")
+        # 4. UPDATE UI TEXT (Matched to new requirements)
+        self.lbl_final_dodges.setText(f"SCORE: {final_dodges}")
+        self.lbl_final_hits.setText(f"MISTAKES: {hits}")
         self.lbl_final_accuracy.setText(f"ACCURACY: {accuracy:.1f}%")
         
         # 5. FORCE REFRESH
@@ -1826,7 +2147,7 @@ class MainWindow(QMainWindow):
         self.lbl_final_accuracy.repaint()
 
         # 6. SWITCH SCREEN
-        self.central_widget.setCurrentIndex(5) # Jump to Score (Index 5)
+        self.central_widget.setCurrentIndex(5)
 
     def exit_to_menu(self):
         self.central_widget.setCurrentIndex(0) # Back to Landing (Index 0)
@@ -1837,36 +2158,55 @@ class MainWindow(QMainWindow):
     def update_hud(self, dodged, total, feedback, time_sec, color):
         # Updates the Score and Time text on the game screen
         if hasattr(self, 'lbl_score'):
-            # CHANGED TO 'SUCCESS' HERE:
-            self.lbl_score.setText(f"SUCCESS: {dodged} / {total}")
+            # CHANGED 'SUCCESS' -> 'SCORE'
+            self.lbl_score.setText(f"SCORE: {dodged} / {total}")
         
         if hasattr(self, 'lbl_game_time'):
             m = time_sec // 60
             s = time_sec % 60
             self.lbl_game_time.setText(f"TIME: {m:02d}:{s:02d}")
 
+
+# --- HELPER FUNCTION: PREVENT DOUBLE OPENING ---
+def is_already_running():
+    # 1. Create a unique ID for this game
+    unique_id = "Global\\AeroplaneGame_v1_Unique_Lock"
+    kernel32 = ctypes.windll.kernel32
+    
+    # 2. Try to create a "Lock" (Mutex)
+    mutex = kernel32.CreateMutexW(None, False, unique_id)
+    
+    # 3. If Error 183, the Lock already exists (Game is open)
+    last_error = kernel32.GetLastError()
+    return last_error == 183
+# -----------------------------------------------
+
 if __name__ == "__main__":
+    # [STEP 0] CHECK IF GAME IS ALREADY OPEN
+    if is_already_running():
+        sys.exit(0)  # Close silently if already running
+    
     app = QApplication(sys.argv)
 
-    # 1. Create Splash Screen
+    # [STEP 1] CREATE SPLASH SCREEN (Logic Preserved)
     splash = LoadingScreen()
-    splash.showFullScreen() # <--- CHANGED THIS TO FULL SCREEN
+    splash.showFullScreen() 
 
-    # 2. Create Loader Thread
+    # [STEP 2] CREATE LOADER THREAD
     loader = GameLoader()
 
-    # 3. Define function to Start Game after loading
+    # [STEP 3] START GAME FUNCTION
     def start_game(inferencer, game_engine):
         global window 
         window = MainWindow(inferencer, game_engine)
         window.showFullScreen()
         splash.close()
 
-    # 4. Connect Signals
+    # [STEP 4] CONNECT SIGNALS
     loader.progress.connect(splash.update_progress)
     loader.finished.connect(start_game)
 
-    # 5. Start Loading
+    # [STEP 5] START LOADING
     loader.start()
 
     sys.exit(app.exec_())
