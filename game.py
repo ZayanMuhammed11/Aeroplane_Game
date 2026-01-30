@@ -12,7 +12,6 @@ else:
 
 os.environ["OPENMMLAB_CACHE_DIR"] = os.path.join(BASE_DIR, "openmmlab_cache")
 os.environ["TORCH_HOME"] = os.path.join(BASE_DIR, "openmmlab_cache")
-# ============================================================
 
 import cv2
 import numpy as np
@@ -631,8 +630,6 @@ class GameEngine:
 
     # --- HELPER: DRAW ZONES 
     def draw_zone_highlight(self, frame, w, h, x1, x2):
-        # REMOVED the flashing condition: if (self.frame_counter // 10) % 2 == 0:
-        # Now it draws continuously until the state changes.
         
         overlay = frame.copy()
         
@@ -734,7 +731,6 @@ class GameEngine:
                 self.trigger_message("PERFECT DODGE!", CV_COLOR_GREEN)
                 AudioManager.play("SUCCESS")
                 return
-            # ======================================
 
             # For Medium/Hard, we keep the strict checks:
             if not is_valid_squat: 
@@ -1074,11 +1070,9 @@ class MainWindow(QMainWindow):
             else:
                 self.showFullScreen()
 
-    # --- NEW: LANDING PAGE
     def init_landing_screen(self):
         page = QWidget()
         
-        # --- 1. Background Setup (EXACTLY PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1092,7 +1086,6 @@ class MainWindow(QMainWindow):
         else:
             page.setStyleSheet("background-color: #0d1b2a;")
 
-        # --- 2. Layouts (MODIFIED FOR NEW POSITIONS) ---
         main_layout = QVBoxLayout()
         
         # Left=30, Top=30 (for Exit), Right=30, Bottom=150 (Keeps Play button at original height)
@@ -1122,8 +1115,6 @@ class MainWindow(QMainWindow):
             }
         """
 
-        # --- 4. EXIT BUTTON (MOVED TO TOP RIGHT) ---
-        # We create this first so we can place it at the top
         btn_exit = QPushButton()
         btn_exit.setFixedSize(190, 90)
         btn_exit.setStyleSheet(LANDING_BTN_STYLE)
@@ -1137,14 +1128,10 @@ class MainWindow(QMainWindow):
         btn_exit.clicked.connect(lambda: AudioManager.play("EXIT")) 
         btn_exit.clicked.connect(self.close)
 
-        # Add to Layout: Align RIGHT and TOP
         main_layout.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
 
-        # --- 5. SPACER (THE SEPARATOR) ---
-        # This invisible spring pushes Exit up and Play down
         main_layout.addStretch()
 
-        # --- 6. PLAY BUTTON (KEPT AT BOTTOM CENTER) ---
         btn_play = QPushButton()
         btn_play.setFixedSize(380, 160)
         btn_play.setStyleSheet(LANDING_BTN_STYLE)
@@ -1155,21 +1142,17 @@ class MainWindow(QMainWindow):
         else:
             btn_play.setText("PLAY")
 
-        # Logic preserved
         btn_play.clicked.connect(lambda: AudioManager.play("CLICK"))
         btn_play.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
 
-        # Add to Layout: Align CENTER and BOTTOM
         main_layout.addWidget(btn_play, 0, Qt.AlignCenter | Qt.AlignBottom)
 
-        # --- 7. Finalize ---
         page.setLayout(main_layout)
         self.central_widget.addWidget(page)
 
     def init_menu_screen(self):
         page = QWidget()
         
-        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         bg_path = get_asset_path("bg2.png")
@@ -1182,11 +1165,9 @@ class MainWindow(QMainWindow):
         else:
             page.setStyleSheet("background-color: #1e1e2e;") 
 
-        # --- 2. Main Layout ---
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(30, 20, 30, 30)
 
-        # --- 3. Shared Button Style ---
         LANDING_BTN_STYLE = """
             QPushButton {
                 background-color: transparent;
@@ -1205,10 +1186,8 @@ class MainWindow(QMainWindow):
             }
         """
 
-        # --- 4. TOP BAR (Back & Exit Buttons) ---
         top_bar_layout = QHBoxLayout()
 
-        # [BACK BUTTON] - Top Left
         btn_back = QPushButton()
         btn_back.setFixedSize(190, 90) 
         btn_back.setStyleSheet(LANDING_BTN_STYLE)
@@ -1222,10 +1201,8 @@ class MainWindow(QMainWindow):
             
         btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
         
-        # === CHANGE 1: Redirect to Instructions (Index 1) ===
         btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(1))
 
-        # [EXIT BUTTON] - Top Right
         btn_exit = QPushButton()
         btn_exit.setFixedSize(190, 90)
         btn_exit.setStyleSheet(LANDING_BTN_STYLE)
@@ -1246,7 +1223,6 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(top_bar_layout)
 
-        # --- 5. THE MENU BOX (Center) ---
         menu_box = QFrame()
         menu_box.setFixedSize(600, 500) 
         menu_box.setStyleSheet("""
@@ -1321,22 +1297,18 @@ class MainWindow(QMainWindow):
         box_layout.addWidget(btn_side, 0, Qt.AlignCenter)
         box_layout.addStretch(1)
 
-        # === CHANGE 2: Perfect Centering ===
-        # We add a Stretch BEFORE the box to push it down from the top bar
         main_layout.addStretch(1) 
         
         main_layout.addWidget(menu_box, 0, Qt.AlignCenter)
         
-        # We add a Stretch AFTER the box to push it up from the bottom
         main_layout.addStretch(1) 
         
         page.setLayout(main_layout)
         self.central_widget.addWidget(page)
-    # --- UPDATED SETTINGS SCREEN (Background + Button Styles) ---
+
     def init_settings_screen(self):
         self.settings_page = QWidget()
 
-        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         path_bg_settings = get_asset_path("bg2.png")
@@ -1349,15 +1321,11 @@ class MainWindow(QMainWindow):
         else:
             self.settings_page.setStyleSheet("background-color: #1e1e2e;")
 
-        # --- 2. Main Layout ---
         main_layout = QVBoxLayout()
         main_layout.setAlignment(Qt.AlignTop)
         main_layout.setContentsMargins(30, 20, 30, 40)
         main_layout.setSpacing(20)
 
-        # =================================================================
-        #    NANO BANANA STYLESHEET
-        # =================================================================
         self.settings_page.setStyleSheet("""
             /* The Main curved container */
             QFrame#ControlDeck {
@@ -1419,7 +1387,6 @@ class MainWindow(QMainWindow):
             QPushButton.nav_btn:hover { padding-top: 0px; padding-bottom: 10px; }
         """)
 
-        # --- 3. TOP BAR (Back & Exit) ---
         top_bar = QHBoxLayout()
         
         btn_back = QPushButton(); btn_back.setFixedSize(190, 90)
@@ -1443,19 +1410,16 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
         main_layout.addLayout(top_bar)
 
-        main_layout.addStretch(1) # Spring 1
+        main_layout.addStretch(1) 
 
-        # --- 4. THE "NANO BANANA" CONTROL DECK (Now Includes Mode) ---
         control_deck = QFrame()
         control_deck.setObjectName("ControlDeck") 
-        control_deck.setFixedSize(1100, 600) # Increased height to fit Mode Banner
+        control_deck.setFixedSize(1100, 600) 
         
-        # CHANGED: Deck is now Vertical to stack [Mode] over [Modules]
         deck_layout_main = QVBoxLayout(control_deck)
         deck_layout_main.setSpacing(10)
         deck_layout_main.setContentsMargins(40, 30, 40, 40)
 
-        # A. MODE BANNER (Inside the Box)
         self.lbl_mode = QLabel("MODE: STATIONARY")
         self.lbl_mode.setAlignment(Qt.AlignCenter)
         self.lbl_mode.setStyleSheet("""
@@ -1468,24 +1432,21 @@ class MainWindow(QMainWindow):
         
         deck_layout_main.addSpacing(10)
 
-        # B. MODULES CONTAINER (Horizontal)
         modules_widget = QWidget()
         modules_layout = QHBoxLayout(modules_widget)
         modules_layout.setSpacing(40)
         modules_layout.setContentsMargins(0,0,0,0)
 
-        # [LEFT MODULE: DIFFICULTY]
         diff_module = QFrame(); diff_module.setObjectName("ModuleBox")
         diff_layout_v = QVBoxLayout(diff_module)
-        diff_layout_v.setAlignment(Qt.AlignCenter) # Center content vertically
+        diff_layout_v.setAlignment(Qt.AlignCenter) 
         
         lbl_diff_title = QLabel("LEVEL"); lbl_diff_title.setProperty("class", "header")
         lbl_diff_title.setAlignment(Qt.AlignCenter)
         
-        # Difficulty Buttons Container
         diff_btns_layout = QVBoxLayout()
         diff_btns_layout.setSpacing(15)
-        diff_btns_layout.setAlignment(Qt.AlignCenter) # ALIGNMENT FIX
+        diff_btns_layout.setAlignment(Qt.AlignCenter)
 
         self.btn_easy = QPushButton("EASY"); self.btn_med = QPushButton("MEDIUM"); self.btn_hard = QPushButton("HARD")
         ids = ["BtnEasy", "BtnMed", "BtnHard"]
@@ -1545,9 +1506,8 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(control_deck, 0, Qt.AlignCenter)
 
-        main_layout.addStretch(1) # Spring 2
+        main_layout.addStretch(1) 
 
-        # --- 5. START IGNITION BUTTON ---
         self.btn_start = QPushButton("INITIALIZING...") 
         self.btn_start.setFixedSize(450, 100) 
         self.btn_start.setCursor(Qt.PointingHandCursor)
@@ -1570,16 +1530,15 @@ class MainWindow(QMainWindow):
             QPushButton:pressed { background-color: #81c88b; }
         """)
         main_layout.addWidget(self.btn_start, 0, Qt.AlignCenter)
-        main_layout.addStretch(1) # Bottom Spring
+        main_layout.addStretch(1) 
 
         self.settings_page.setLayout(main_layout)
         self.central_widget.addWidget(self.settings_page)
         self.set_difficulty(1)
-    # --- NEW: INSTRUCTIONS SCREEN (Scaled to Fit Box) ---
+
     def init_instructions_screen(self):
         self.instr_page = QWidget()
 
-        # --- 1. Background Setup (PRESERVED) ---
         palette = QPalette()
         screen_rect = QApplication.primaryScreen().size()
         path_bg = get_asset_path("bg2.png")
@@ -1592,12 +1551,9 @@ class MainWindow(QMainWindow):
         else:
             self.instr_page.setStyleSheet("background-color: #1e1e2e;")
 
-        # --- 2. Main Layout ---
         main_layout = QVBoxLayout()
-        # Adjusted margins: (Left, Top, Right, Bottom)
         main_layout.setContentsMargins(30, 20, 30, 30)
 
-        # --- 3. Shared Button Style (Floating Effect) ---
         LANDING_BTN_STYLE = """
             QPushButton {
                 background-color: transparent;
@@ -1616,10 +1572,8 @@ class MainWindow(QMainWindow):
             }
         """
 
-        # --- 4. TOP BAR (Back & Exit Buttons) ---
         top_bar_layout = QHBoxLayout()
 
-        # [BACK BUTTON] - Top Left
         btn_back = QPushButton()
         btn_back.setFixedSize(190, 90) 
         btn_back.setStyleSheet(LANDING_BTN_STYLE)
@@ -1634,7 +1588,6 @@ class MainWindow(QMainWindow):
         btn_back.clicked.connect(lambda: AudioManager.play("EXIT")) 
         btn_back.clicked.connect(lambda: self.central_widget.setCurrentIndex(0))
 
-        # [EXIT BUTTON] - Top Right
         btn_exit = QPushButton()
         btn_exit.setFixedSize(190, 90)
         btn_exit.setStyleSheet(LANDING_BTN_STYLE)
@@ -1649,19 +1602,14 @@ class MainWindow(QMainWindow):
         btn_exit.clicked.connect(lambda: AudioManager.play("EXIT"))
         btn_exit.clicked.connect(self.close)
 
-        # Add to Layout: Back (Left) --- Stretch --- Exit (Right)
         top_bar_layout.addWidget(btn_back, 0, Qt.AlignLeft | Qt.AlignTop)
         top_bar_layout.addStretch() 
         top_bar_layout.addWidget(btn_exit, 0, Qt.AlignRight | Qt.AlignTop)
 
         main_layout.addLayout(top_bar_layout)
         
-        # --- 5. CONTENT BOX (Instructions) ---
         content_box = QFrame()
         
-        # === SIZE INCREASED HERE ===
-        # Old: (1150, 700) -> New: (1250, 800)
-        # This fits the 28px font comfortably
         content_box.setFixedSize(1250, 800) 
         
         content_box.setStyleSheet("""
@@ -1676,7 +1624,6 @@ class MainWindow(QMainWindow):
         box_layout.setSpacing(0)
         box_layout.setContentsMargins(50, 30, 50, 30)
 
-        # Title (PRESERVED: 65px)
         lbl_title = QLabel("HOW TO PLAY")
         lbl_title.setAlignment(Qt.AlignCenter)
         lbl_title.setStyleSheet("""
@@ -1689,7 +1636,6 @@ class MainWindow(QMainWindow):
             border: none;
         """)
 
-        # Instructions Text (PRESERVED: 28px)
         lbl_instr = QLabel()
         lbl_instr.setWordWrap(True)
         lbl_instr.setTextFormat(Qt.RichText)
@@ -1719,7 +1665,6 @@ class MainWindow(QMainWindow):
         """
         lbl_instr.setText(instructions_html)
 
-        # [START BUTTON] - Kept inside box at bottom center (PRESERVED STYLE)
         btn_start = QPushButton("START")
         btn_start.setFixedSize(240, 75)
         btn_start.setCursor(Qt.PointingHandCursor)
@@ -1731,7 +1676,6 @@ class MainWindow(QMainWindow):
             QPushButton:pressed { background-color: #81c88b; }
         """)
 
-        # Add Widgets to Box
         box_layout.addWidget(lbl_title)
         box_layout.addWidget(lbl_instr, 1)
         box_layout.addWidget(btn_start, 0, Qt.AlignCenter) 
@@ -1741,7 +1685,7 @@ class MainWindow(QMainWindow):
 
         self.instr_page.setLayout(main_layout)
         self.central_widget.addWidget(self.instr_page)
-    # --- UPDATED GAME SCREEN (Grouped Info Boxes) ---
+
     def init_game_screen(self):
         page = QWidget()
         
@@ -2037,12 +1981,10 @@ class MainWindow(QMainWindow):
         box_layout.addSpacing(5)
         box_layout.addWidget(self.lbl_final_accuracy)
         
-        # Reduced spacing here to make room for the gap between buttons
         box_layout.addSpacing(20)
         
         box_layout.addWidget(btn_restart, 0, Qt.AlignCenter)
         
-        # === ADDED SPACE HERE ===
         box_layout.addSpacing(20) 
         
         box_layout.addWidget(btn_menu, 0, Qt.AlignCenter)
@@ -2063,7 +2005,6 @@ class MainWindow(QMainWindow):
     def set_difficulty(self, level):
         self.game_engine.difficulty = level
         
-        # Update UI state without destroying the Stylesheet
         self.btn_easy.setChecked(level == 1)
         self.btn_med.setChecked(level == 2)
         self.btn_hard.setChecked(level == 3)
@@ -2136,7 +2077,6 @@ class MainWindow(QMainWindow):
         else:
             accuracy = 0.0
 
-        # 4. UPDATE UI TEXT (Matched to new requirements)
         self.lbl_final_dodges.setText(f"SCORE: {final_dodges}")
         self.lbl_final_hits.setText(f"MISTAKES: {hits}")
         self.lbl_final_accuracy.setText(f"ACCURACY: {accuracy:.1f}%")
@@ -2158,7 +2098,6 @@ class MainWindow(QMainWindow):
     def update_hud(self, dodged, total, feedback, time_sec, color):
         # Updates the Score and Time text on the game screen
         if hasattr(self, 'lbl_score'):
-            # CHANGED 'SUCCESS' -> 'SCORE'
             self.lbl_score.setText(f"SCORE: {dodged} / {total}")
         
         if hasattr(self, 'lbl_game_time'):
@@ -2188,7 +2127,7 @@ if __name__ == "__main__":
     
     app = QApplication(sys.argv)
 
-    # [STEP 1] CREATE SPLASH SCREEN (Logic Preserved)
+    # [STEP 1] CREATE SPLASH SCREEN 
     splash = LoadingScreen()
     splash.showFullScreen() 
 
