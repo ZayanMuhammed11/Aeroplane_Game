@@ -1,4 +1,4 @@
-# ✈️ Aeroplane Game
+# ✈️ Aeroplane Game 
 
 **Aeroplane Game** is an AI-powered physical therapy game that uses your computer's webcam to detect your body movement and avoid the aeroplane hitting you. By squatting you can avoid the aeroplane.
 
